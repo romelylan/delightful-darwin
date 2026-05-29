@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0.2
+    container_name: poc-keycloak
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: adminpassword
+      KC_FEATURES: token-exchange,admin-fine-grained-authz
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_BACKCHANNEL: "false"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    ports:
+      - "8080:8080"
+    networks:
+      - poc-network
+
+  # Core API Gateway: Decoupled Edge Token Offloader (Spring Cloud Gateway)
+  core-gateway:
+    build:
+      context: ./core-gateway
+      dockerfile: Dockerfile
+    container_name: poc-core-gateway
+    environment:
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_JWK_SET_URI: http://keycloak:8080/realms/production/protocol/openid-connect/certs
+      CORE_BE_URI: http://core-be:8082
+    ports:
+      - "9000:9000"
+    depends_on:
+      - keycloak
+    networks:
+      - poc-network
+
+  # Core Team Backend: Receives trusted headers, zero cryptographic overhead
+  core-be:
+    build:
+      context: ./core-be
+      dockerfile: Dockerfile
+    container_name: poc-core-be
+    ports:
+      - "8082:8082"
+    networks:
+      - poc-network
+
+  # Mini App Backend: Executes Keycloak Token Exchange (RFC 8693) & forwards calls
+  mini-app-be:
+    build:
+      context: ./mini-app-be
+      dockerfile: Dockerfile
+    container_name: poc-mini-app-be
+    environment:
+      KEYCLOAK_TOKEN_URL: http://core-gateway:9000/realms/production/protocol/openid-connect/token
+      CORE_GATEWAY_URL: http://core-gateway:9000
+    ports:
+      - "8081:8081"
+    depends_on:
+      - keycloak
+      - core-gateway
+    networks:
+      - poc-network
+
+  # Guest Web App: Standard Static web app served inside Docker to act as our CDN
+  guest-webapp:
+    image: nginx:alpine
+    container_name: poc-guest-webapp
+    volumes:
+      - ./guest-webapp:/usr/share/nginx/html:ro
+    ports:
+      - "5000:80"
+    networks:
+      - poc-network
+
+networks:
+  poc-network:
+    driver: bridge

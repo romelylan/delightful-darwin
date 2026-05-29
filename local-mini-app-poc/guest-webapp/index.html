@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Insurance Loyalty - Scoped Sandboxed Mini App</title>
+  <!-- Modern Inter typography -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  
+  <style>
+    :root {
+      --bg-dark: #0f172a;
+      --card-bg: rgba(30, 41, 59, 0.7);
+      --border-color: rgba(255, 255, 255, 0.1);
+      --primary: #38bdf8;
+      --secondary: #818cf8;
+      --success: #34d399;
+      --error: #f87171;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: 'Inter', sans-serif;
+    }
+
+    body {
+      background-color: var(--bg-dark);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      overflow-x: hidden;
+    }
+
+    /* Vibrant abstract gradient backgrounds in glassmorphic overlay */
+    body::before {
+      content: '';
+      position: absolute;
+      width: 400px;
+      height: 400px;
+      background: radial-gradient(circle, rgba(56, 189, 248, 0.2) 0%, rgba(0,0,0,0) 70%);
+      top: -100px;
+      left: -100px;
+      z-index: -1;
+    }
+    body::after {
+      content: '';
+      position: absolute;
+      width: 500px;
+      height: 500px;
+      background: radial-gradient(circle, rgba(129, 140, 248, 0.15) 0%, rgba(0,0,0,0) 70%);
+      bottom: -150px;
+      right: -100px;
+      z-index: -1;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 550px;
+      background: var(--card-bg);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--border-color);
+      border-radius: 24px;
+      padding: 30px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+      animation: fadeIn 0.6s ease-out;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 25px;
+    }
+
+    h1 {
+      font-size: 24px;
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--primary), var(--secondary));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 6px;
+    }
+
+    .subtitle {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .card {
+      background: rgba(15, 23, 42, 0.4);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+
+    .status-badge {
+      display: inline-block;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      border-radius: 9999px;
+      margin-bottom: 15px;
+      text-transform: uppercase;
+    }
+
+    .status-badge.pending {
+      background: rgba(245, 158, 11, 0.2);
+      color: #fbbf24;
+      border: 1px solid rgba(245, 158, 11, 0.3);
+    }
+
+    .status-badge.success {
+      background: rgba(52, 211, 153, 0.2);
+      color: var(--success);
+      border: 1px solid rgba(52, 211, 153, 0.3);
+    }
+
+    .btn {
+      width: 100%;
+      background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
+      color: var(--text);
+      border: none;
+      padding: 14px;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      box-shadow: 0 4px 15px rgba(56, 189, 248, 0.2);
+      margin-bottom: 12px;
+    }
+
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(56, 189, 248, 0.35);
+    }
+
+    .btn:disabled {
+      background: #334155;
+      color: #64748b;
+      cursor: not-allowed;
+      box-shadow: none;
+      transform: none;
+    }
+
+    .console-card {
+      background: #020617;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+      padding: 15px;
+      font-family: monospace;
+      font-size: 11px;
+      max-height: 180px;
+      overflow-y: auto;
+      color: #38bdf8;
+      text-align: left;
+    }
+
+    .console-line {
+      margin-bottom: 5px;
+      line-height: 1.4;
+      word-break: break-all;
+    }
+
+    .console-line.success-text {
+      color: var(--success);
+    }
+
+    .console-line.error-text {
+      color: var(--error);
+    }
+
+    .console-line.system-text {
+      color: var(--text-muted);
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <header>
+      <div class="status-badge pending" id="authStatusBadge">Unauthenticated</div>
+      <h1>Insurance Loyalty Rewards</h1>
+      <div class="subtitle">Model 2 Sandbox Mini-App (Vite / SPA Mock)</div>
+    </header>
+
+    <div class="card">
+      <button class="btn" id="btnRequestToken" onclick="fetchTokenFromHost()">
+        1. Request Scoped Token from Host App
+      </button>
+      <button class="btn" id="btnClaimReward" onclick="claimLoyaltyReward()" disabled>
+        2. Claim Premium Insurance Gift (Deducts Points)
+      </button>
+    </div>
+
+    <div class="card">
+      <div style="font-size: 12px; font-weight: 600; margin-bottom: 10px; color: var(--text-muted);">
+        Real-Time Ecosystem Handshake Log
+      </div>
+      <div class="console-card" id="consoleOutput">
+        <div class="console-line system-text">[Console Idle] Awaiting User Handshake.</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // -------------------------------------------------------------
+    // CLIENT-SIDE JS SDK: PROMISE RESOLUTION PATTERN
+    // -------------------------------------------------------------
+    window._hostAppCallbacks = {};
+    let activeToken = null;
+
+    const hostAppSdk = {
+      auth: {
+        getToken: function(scopes) {
+          return new Promise((resolve, reject) => {
+            const requestId = "req_" + Date.now() + "_" + Math.floor(Math.random() * 1000);
+            
+            // Register resolve/reject callbacks dynamically in window context
+            window._hostAppCallbacks[requestId] = {
+              resolve: (token) => {
+                logConsole(`Promise Resolved successfully for ID: ${requestId}`, "success");
+                resolve(token);
+              },
+              reject: (err) => {
+                logConsole(`Promise Rejected for ID: ${requestId} - Error: ${err}`, "error");
+                reject(err);
+              }
+            };
+
+            logConsole(`Generating pending JS Promise [${requestId}] for scopes: [${scopes.join(', ')}]`, "system");
+
+            // Dispatch message across secure WebView channel or parent window postMessage
+            try {
+              const payload = JSON.stringify({
+                miniAppId: "com.vendor.loyalty-rewards",
+                requestId: requestId,
+                action: "auth.getToken",
+                params: { scopes: scopes }
+              });
+
+              if (window.flutter_inappwebview) {
+                logConsole(`Sending postMessage payload to Flutter Host App (Mobile)...`, "system");
+                window.flutter_inappwebview.callHandler('JSBridgeChannel', payload);
+              } else if (window.parent !== window) {
+                logConsole(`Sending postMessage payload to Parent Window (Web iFrame)...`, "system");
+                window.parent.postMessage(payload, "*");
+              } else {
+                throw new Error("Webview Host context not found. Are you running this inside the Flutter Host App?");
+              }
+            } catch (e) {
+              delete window._hostAppCallbacks[requestId];
+              reject(e.message);
+            }
+          });
+        }
+      }
+    };
+
+    // Setup message listener to receive response from parent window (for Web/iframe mode)
+    window.addEventListener('message', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data && data.requestId && window._hostAppCallbacks[data.requestId]) {
+          if (data.status === "success") {
+            window._hostAppCallbacks[data.requestId].resolve(data.token);
+          } else {
+            window._hostAppCallbacks[data.requestId].reject(data.error);
+          }
+        }
+      } catch (e) {
+        // Ignore parsing errors for other messages
+      }
+    });
+
+    function logConsole(message, type = "normal") {
+      const consoleEl = document.getElementById("consoleOutput");
+      const line = document.createElement("div");
+      line.className = "console-line";
+      
+      if (type === "success") line.classList.add("success-text");
+      if (type === "error") line.classList.add("error-text");
+      if (type === "system") line.classList.add("system-text");
+
+      const time = new Date().toLocaleTimeString();
+      line.innerText = `[${time}] ${message}`;
+      consoleEl.appendChild(line);
+      consoleEl.scrollTop = consoleEl.scrollHeight;
+    }
+
+    // -------------------------------------------------------------
+    // BUTTON ACTIONS
+    // -------------------------------------------------------------
+
+    async function fetchTokenFromHost() {
+      try {
+        logConsole("Requesting OIDC exchange scoped token...", "normal");
+        
+        // Triggers the JS-Bridge evaluateJavascript promise handshake
+        activeToken = await hostAppSdk.auth.getToken(["loyalty-scope"]);
+        
+        logConsole(`Acquired Scoped Micro-JWT: ${activeToken.substring(0, 30)}...`, "success");
+        
+        // Update UI status
+        const badge = document.getElementById("authStatusBadge");
+        badge.innerText = "AUTHENTICATED";
+        badge.className = "status-badge success";
+        
+        document.getElementById("btnClaimReward").disabled = false;
+      } catch (err) {
+        logConsole(`Auth Handshake Failed: ${err}`, "error");
+      }
+    }
+
+    async function claimLoyaltyReward() {
+      if (!activeToken) {
+        logConsole("Authentication required. Please request token first.", "error");
+        return;
+      }
+
+      logConsole("Sending claim reward request to Mini App Backend on port 8081...", "normal");
+      
+      try {
+        // Triggers the Backend two-step validation flow
+        const response = await fetch("http://localhost:8081/api/rewards/claim", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${activeToken}` // Injects Scoped Micro-JWT
+          },
+          body: JSON.stringify({
+            rewardName: "Insurance Premium Upgrade Discount (100 pts)"
+          })
+        });
+
+        const data = await response.json();
+        
+        if (response.ok) {
+          logConsole("=== CLAIM CONFIRMED ===", "success");
+          logConsole(`Item    : ${data.rewardItem}`, "success");
+          logConsole(`Wallet  : ${data.coreWalletResult.message}`, "success");
+          logConsole(`Balance : ${data.coreWalletResult.remainingBalance} pts`, "success");
+        } else {
+          logConsole(`Claim Failed: ${data.error} - ${data.details}`, "error");
+        }
+      } catch (err) {
+        logConsole(`Network Error connecting to Vendor Backend: ${err.message}`, "error");
+      }
+    }
+  </script>
+
+</body>
+</html>

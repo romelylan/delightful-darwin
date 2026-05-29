@@ -1,0 +1,87 @@
+{
+  "id": "production",
+  "realm": "production",
+  "enabled": true,
+  "users": [
+    {
+      "username": "testuser",
+      "enabled": true,
+      "email": "testuser@yourdomain.com",
+      "firstName": "Test",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "password",
+          "temporary": false
+        }
+      ]
+    }
+  ],
+  "clientScopes": [
+    {
+      "name": "loyalty-scope",
+      "protocol": "openid-connect",
+      "attributes": {
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Access loyalty rewards system"
+      },
+      "protocolMappers": [
+        {
+          "name": "loyalty-audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "mini-app-loyalty-rewards",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "flutter-host-app",
+      "enabled": true,
+      "publicClient": true,
+      "redirectUris": [
+        "http://localhost*",
+        "http://10.0.2.2*",
+        "my-host-app://*"
+      ],
+      "webOrigins": [
+        "*"
+      ],
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "optionalClientScopes": [],
+      "defaultClientScopes": [
+        "loyalty-scope"
+      ]
+    },
+    {
+      "clientId": "mini-app-loyalty-rewards",
+      "enabled": true,
+      "secret": "loyalty-secret",
+      "publicClient": false,
+      "serviceAccountsEnabled": true,
+      "authorizationServicesEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "protocol": "openid-connect"
+    },
+    {
+      "clientId": "core-wallet-service",
+      "enabled": true,
+      "secret": "wallet-secret",
+      "publicClient": false,
+      "serviceAccountsEnabled": true,
+      "protocol": "openid-connect",
+      "optionalClientScopes": [],
+      "defaultClientScopes": [
+        "loyalty-scope"
+      ]
+    }
+  ]
+}
