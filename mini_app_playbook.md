@@ -812,4 +812,330 @@ local-mini-app-poc/
 └── flutter-host/               # Mock Flutter Host App (WebView + SecureJSBridge)
 ```
 
-The next phase will automatically generate all codebase configurations in your repository.
+### 12.3 Local Ports Mapping & Services Reference
+
+| Service Name | Port | Description |
+| :--- | :--- | :--- |
+| **`keycloak`** | `8080` | Keycloak 24 IAM Server running standard OIDC / RFC 8693 endpoints |
+| **`core-gateway`** | `9000` | Spring Cloud Edge Ingress Gateway doing JWKS validation & Header Propagation |
+| **`mini-app-be`** | `8081` | Spring Boot Mini App Backend executing basic-auth token exchange |
+| **`core-be`** | `8082` | Spring Boot Core Backend doing wallet deductions via trusted headers |
+| **`guest-webapp`** | `5000` | NGINX static server serving the Mini App SPA bundle (Edge CDN Mock) |
+| **`flutter-host`** | `5000+` | Flutter Host Mobile App Shell running on Chrome |
+
+---
+
+## 13. Local POC Walkthrough & Architectural Verification
+
+This section documents the end-to-end local POC implementation that fully de-risked and validated our core architectural hypotheses, specifically focusing on cross-origin iframe security, OIDC Scope Delegation (RFC 8693), and Zero-Trust Header Propagation.
+
+### 13.1 Key Technical Resolutions
+
+During the local POC implementation, three critical integration hurdles were successfully solved:
+
+1. **Stateful Platform WebView in Flutter Web (`StatefulWidget`)**:
+   In Flutter Web, using a stateless wrapper around `HtmlElementView` causes the dynamic `viewType` and `IFrameElement` to recreate on every state change (e.g. logging telemetry). This destroys the Guest App's active JS context and reloads the page.
+   * **Resolution**: The web view is encapsulated inside a `StatefulWidget` where the `IFrameElement` is instantiated exactly once in `initState()`. Telemetry logs are safely deferred via `WidgetsBinding.instance.addPostFrameCallback` to prevent `setState() during build` runtime exceptions.
+2. **Dynamic Issuer URL Matching in Keycloak (`KC_HOSTNAME`)**:
+   Keycloak checks the `iss` claim strictly. In a dual-environment (external browser at `localhost:8080` vs internal container at `keycloak:8080`), Keycloak dynamically stamps different issuers based on the Host header, causing the backend token exchange to fail with `invalid_token`.
+   * **Resolution**: Forced Keycloak to resolve a fixed hostname URL via `KC_HOSTNAME: localhost`, aligning both external and internal token scopes to the identical issuer URL: `http://localhost:8080/realms/production`.
+3. **Scope Transference during RFC 8693 Token Exchange (`defaultClientScopes`)**:
+   Keycloak V1 token exchange is highly conservative and strips optional scopes during transacting exchanges unless complex delegation rules are declared.
+   * **Resolution**: Reconfigured the realm mappings so that `loyalty-scope` is defined as a **Default Client Scope** (`defaultClientScopes`) on both `flutter-host-app` and `core-wallet-service` clients, ensuring Keycloak implicitly stamps and propagates the active scopes down to the final microservices.
+
+### 13.2 Architectural Verification Sequence
+
+To verify the ecosystem on your local machine, run the following verification sequence:
+
+#### 1. Boot up the Ecosystem Stack
+Run the commands to pull, compile, and launch all services in detached mode:
+```powershell
+cd local-mini-app-poc
+docker compose down
+docker compose build mini-app-be
+docker compose up -d --remove-orphans
+```
+
+#### 2. Re-apply Keycloak Fine-Grained Permissions
+* Log in to the Keycloak Admin Console at `http://localhost:8080` (admin / adminpassword).
+* Under the **`production`** realm, navigate to **`Clients`** -> click **`core-wallet-service`** -> open **`Permissions`** tab.
+* Toggle **`Permissions Enabled`** to **`ON`** and click **`Save`**.
+* Click the blue **`token-exchange`** link in the permissions list table.
+* Click **`Create policy`** -> select **`Client`**.
+  * **Name**: `allow-loyalty-rewards`
+  * **Clients**: Select **`mini-app-loyalty-rewards`**
+* Click **`Save`** at the bottom.
+* Go back to the **`token-exchange`** permission page, select **`allow-loyalty-rewards`** in the **`Policies`** field, and click **`Save`**.
+
+#### 3. Compile and Run the Flutter Host App on Chrome
+Navigate to the Flutter Host App directory and compile for web:
+```powershell
+cd flutter-host
+flutter create --platforms=web .
+flutter run -d chrome
+```
+
+#### 4. The Live Execution Handshake
+1. **Request Scoped Token**:
+   * Click the **`1. Request Scoped Token from Host App`** button inside the Loyalty Rewards Mini App (lower half of Chrome window).
+   * **Ecosystem Handshake Log Output**:
+     ```
+     [Console Idle] Awaiting User Handshake.
+     [7:55:50 PM] Requesting OIDC exchange scoped token...
+     [7:55:50 PM] Generating pending JS Promise [req_1780055750109_959] for scopes: [loyalty-scope]
+     [7:55:50 PM] Sending postMessage payload to Parent Window (Web iFrame)...
+     [7:55:50 PM] Promise Resolved successfully for ID: req_1780055750109_959
+     [7:55:50 PM] Acquired Scoped Micro-JWT: eyJhbGciOiJSUzI1NiIsInR5cCIgOi...
+     ```
+2. **Claim Premium Gift**:
+   * Click **`2. Claim Premium Insurance Gift (Deducts Points)`** button.
+   * **Ecosystem Handshake Log Output**:
+     ```
+     [7:56:01 PM] Sending claim reward request to Mini App Backend on port 8081...
+     [7:56:02 PM] === CLAIM CONFIRMED ===
+     [7:56:02 PM] Item    : Insurance Premium Upgrade Discount (100 pts)
+     [7:56:02 PM] Wallet  : Wallet points deducted successfully.
+     [7:56:02 PM] Balance : 900 pts
+     ```
+
+#### 5. Verify the Propagated Downstream Headers
+To verify that the Core AKS service successfully received the offloaded trusted user context, execute:
+```powershell
+docker logs -f poc-core-be
+```
+**Expected Downstream Log Signature:**
+```
+====== CORE AKS BACKEND RECEIVED CALL ======
+X-User-Id    (User UUID)     : 48da6d26-bacb-44e5-bca7-231b1438c919
+X-Client-Id  (Calling Client): mini-app-loyalty-rewards
+X-User-Scopes(Active Scopes) : loyalty-scope
+==========================================
+```
+
+This successfully validates that our central architectural goals—**strict isolation, cryptographic offloading, dynamic scope delegation, and header propagation**—are fully realized and production-ready!
+
+---
+
+## 14. Enterprise Keycloak Onboarding & Configuration Guide
+
+To scale your ecosystem and onboard multiple internal or third-party Mini Apps, your Identity and Access Management (IAM) team must follow a standardized, secure process in Keycloak. This guide provides the complete administrative playbook for onboarding a new Mini App, establishing OIDC scope constraints, and configuring token exchange permissions.
+
+### 14.1 Keycloak Client Topology Blueprint
+
+For every Mini App you onboard, you must define its operational role in Keycloak. We categorize clients into three distinct OIDC profiles:
+
+1. **Confidential Backend Client (`mini-app-[name]-be`)**:
+   * **Purpose**: Represents the Mini App’s secure server-side container.
+   * **Client Authentication**: Enabled (Confidential).
+   * **Authorization**: Enabled.
+   * **Service Accounts**: Enabled (Required for backend-to-backend calls).
+2. **Public Mobile Client Scope (`flutter-host-app`)**:
+   * **Purpose**: Exists as a single client representing your host shell. It requests scoped tokens on behalf of the user when a Mini App is launched.
+3. **Core API Resource Client (`core-[service]-service`)**:
+   * **Purpose**: Represents the core AKS microservice API cluster (e.g. `core-wallet-service`) that the Mini App wants to transact with.
+
+---
+
+### 14.2 Step-by-Step Mini App Onboarding Guide
+
+Follow these five administrative steps to onboard a new Mini App named **`mini-app-insurance`** which needs to transact with the core backend service **`core-wallet-service`**.
+
+#### Step 1: Register the Mini App Backend Client
+1. Log in to the Keycloak Admin Console. Select your designated **Ecosystem Realm** (e.g. `production`).
+2. Go to **Clients** in the left sidebar and click **Create client**.
+3. Configure the General Settings:
+   * **Client type**: `OpenID Connect`
+   * **Client ID**: `mini-app-insurance-rewards`
+   * **Name**: `Insurance Loyalty Rewards Backend`
+   * Click **Next**.
+4. Configure the Capability Settings (Crucial for Backends):
+   * **Client authentication**: Toggle **ON** (Confidential).
+   * **Authorization**: Toggle **ON**.
+   * **Authentication flow**: Check **Service accounts roles** and **Direct access grants**.
+   * Click **Save**.
+5. Retrieve the Client Secret:
+   * Navigate to the **Credentials** tab.
+   * Copy the generated **Client Secret** (e.g., `insurance-secret-uuid`). Hand this over securely to the Mini App development team.
+
+#### Step 2: Define and Map the Dedicated Client Scope
+Creating a dedicated scope prevents a compromised Mini App from accessing resources belonging to other Mini Apps.
+
+1. Go to **Client scopes** in the left sidebar and click **Create client scope**.
+2. Configure the Scope Details:
+   * **Name**: `insurance-scope`
+   * **Type**: `Default` (To ensure automatic propagation during token exchange).
+   * **Protocol**: `OpenID Connect`
+   * Click **Save**.
+3. Configure the Audience Mapper (Ties the scope securely to the Mini App Backend):
+   * Go to the **Mappers** tab in the `insurance-scope` page.
+   * Click **Configure a new mapper** $\rightarrow$ select **Audience**.
+   * **Name**: `insurance-audience-mapper`
+   * **Included client audience**: `mini-app-insurance-rewards`
+   * **Add to access token**: Toggle **ON**.
+   * Click **Save**.
+4. Associate Scope with the Core API Service:
+   * Go to **Clients** $\rightarrow$ click **`core-wallet-service`**.
+   * Click the **Client scopes** tab.
+   * Click **Add client scope** $\rightarrow$ select **`insurance-scope`** $\rightarrow$ click **Add** $\rightarrow$ select **Default** (highly recommended to prevent Keycloak stripping it during token exchange).
+5. Associate Scope with the Flutter Host App:
+   * Go to **Clients** $\rightarrow$ click **`flutter-host-app`**.
+   * Click the **Client scopes** tab.
+   * Click **Add client scope** $\rightarrow$ select **`insurance-scope`** $\rightarrow$ click **Add** $\rightarrow$ select **Default** (or **Optional** if you want to require user consent screen prompts during bridge startup).
+
+#### Step 3: Enable Target Client Permissions (Fine-Grained Admin Auth)
+By default, Keycloak blocks cross-client token exchanges. We must enable management permissions on the target microservice to allow delegation.
+
+1. Go to **Clients** $\rightarrow$ click on the **target client** (e.g., **`core-wallet-service`**).
+2. Navigate to the **Permissions** tab.
+3. Toggle **Permissions Enabled** to **ON** and click **Save**.
+4. You will see a list of auto-generated permission scopes in the permissions table (e.g. `token-exchange`, `map-roles`).
+
+#### Step 4: Create the Client Exchange Policy
+We define an explicit authorization policy stating that *only* the new Mini App is authorized to exchange tokens targeting the core API.
+
+1. In the **Permissions** tab table of `core-wallet-service`, click the blue **`token-exchange`** link.
+2. Under the **Policies** section, click the **Create policy** dropdown $\rightarrow$ select **Client**.
+3. Configure the Policy:
+   * **Name**: `allow-insurance-exchange`
+   * **Description**: `Allow insurance mini-app backend to exchange tokens for core-wallet.`
+   * **Clients**: Select **`mini-app-insurance-rewards`** from the search dropdown.
+   * Click **Save**.
+
+#### Step 5: Bind Policy to the Token Exchange Permission
+1. Navigate back to the **`token-exchange`** permission page (or click **Clients** $\rightarrow$ **`core-wallet-service`** $\rightarrow$ **Permissions** $\rightarrow$ **`token-exchange`**).
+2. In the **Policies** selection box, select your newly created **`allow-insurance-exchange`** client policy.
+3. Click **Save**.
+
+---
+
+### 14.3 Developer Handover Matrix
+
+Once onboarding is complete, the Core Platform Team hands over the following configuration values to the Mini App Vendor Team to establish their environment connectivity:
+
+| Parameter | Enterprise Value | Description |
+| :--- | :--- | :--- |
+| **`Client ID`** | `mini-app-insurance-rewards` | The unique OIDC client ID identifying the vendor backend |
+| **`Client Secret`** | `[Generated UUID]` | Confidential secret used to authenticate the Token Exchange call |
+| **`Token Endpoint`** | `https://gateway.company.com/realms/production/protocol/openid-connect/token` | The public Core API Gateway route proxying Keycloak |
+| **`Core Service Audience`** | `core-wallet-service` | The target audience to supply in the token exchange parameter |
+| **`Required Scope`** | `insurance-scope` | The OAuth scope required to transact with the core backend APIs |
+
+---
+
+### 14.4 Production Scale & Maintenance Best Practices
+
+1. **Strict mTLS for Backchannel Communication**:
+   In production, secure the connection between the Mini App Backend and Keycloak (Step 3 in token exchange) using Mutual TLS (mTLS) with client certificates rather than plain client secrets. Keycloak supports this natively via **Signed JWT Client Authentication (private_key_jwt)**.
+2. **Rotate Client Secrets Automatically**:
+   Configure a secret rotation lifecycle (e.g., every 90 days) utilizing **Azure Key Vault** to automatically update the client secrets in Keycloak via the Admin REST API and sync them to the vendor's container deployment environments.
+3. **Rotate Client Secrets Automatically**:
+   Enable Keycloak’s **Audit Event Listeners** (`LoginEventListener` and `AdminEventListener`) to log every token exchange request (`TOKEN_EXCHANGE` event type). Feed these logs into **Azure Monitor / Log Analytics** to monitor for unusual exchange volumes or access patterns, providing early detection of hijacked micro-tokens.
+
+---
+
+## 15. Enterprise AKS Cluster Isolation & Organization Blueprint
+
+When hosting multiple first-party and third-party Mini App Backends within the Core Team's **Azure Kubernetes Service (AKS)** infrastructure, you must enforce strict logical, compute, and network separation. By default, Kubernetes allows open pod-to-pod communication across all namespaces. This blueprint details the security patterns required to organize these backends and shield your critical Core microservices from potential compromise.
+
+### 15.1 Logical Namespace Segmentation & RBAC
+
+Every Mini App must reside inside its own isolated Kubernetes Namespace. Do **NOT** deploy Mini App backends into the default namespace or the Core Team's namespace.
+
+```
+       Core Team Namespace: "core-system"
+       ┌────────────────────────────────────────────────────────┐
+       │ ┌───────────────────┐             ┌──────────────────┐ │
+       │ │ core-wallet-pod   │             │ core-profile-pod │ │
+       │ └───────────────────┘             └──────────────────┘ │
+       └────────────────────────────────────────────────────────┘
+                               ▲
+                               │ (Strict RBAC & Network Isolation)
+                               ▼
+       Mini App Namespace: "miniapp-loyalty"
+       ┌────────────────────────────────────────────────────────┐
+       │ ┌───────────────────────┐                              │
+       │ │ loyalty-backend-pod   │                              │
+       │ └───────────────────────┘                              │
+       └────────────────────────────────────────────────────────┘
+```
+
+1. **Namespace Naming Convention**:
+   * Core Team services: `core-system` or `core-services`
+   * Gateway and IAM: `ingress-gateway`
+   * Onboarded Mini Apps: `miniapp-[name]` (e.g. `miniapp-loyalty`, `miniapp-insurance`).
+2. **Kubernetes RBAC (Role-Based Access Control)**:
+   * Define granular `Role` and `RoleBinding` resources. 
+   * **The Rule**: Developers from the Loyalty department are only granted access to the `miniapp-loyalty` namespace. They are strictly blocked from listing, viewing logs, or executing shells inside pods running in `core-system` or `ingress-gateway`.
+
+---
+
+### 15.2 Network Micro-Segmentation (Strict NetworkPolicies)
+
+By default, any pod inside `miniapp-loyalty` can bypass the API Gateway and call Core microservices directly via internal Core DNS (`http://core-wallet-service.core-system.svc.cluster.local`). We enforce a **Zero-Trust Network Segmentation** policy.
+
+1. **Global Default Deny-All Policy**:
+   Apply a `DefaultDeny` NetworkPolicy to all Mini App namespaces. This shuts down all incoming and outgoing pod communication by default.
+2. **Allow Only Gateway Ingress**:
+   Configure the Mini App pods to *only* accept incoming traffic originating from your API Gateway (e.g. KrakenD or NGINX Ingress) sitting in the `ingress-gateway` namespace:
+   ```yaml
+   apiVersion: networking.k8s.io/v1
+   kind: NetworkPolicy
+   metadata:
+     name: allow-ingress-only
+     namespace: miniapp-loyalty
+   spec:
+     podSelector: {} # Applies to all pods in this namespace
+     ingress:
+     - from:
+       - namespaceSelector:
+           matchLabels:
+             kubernetes.io/metadata.name: ingress-gateway # Only allow gateway
+   ```
+3. **Block Direct Core Microservice Egress**:
+   Ensure that no pod inside `miniapp-loyalty` can establish a direct network connection to `core-system`. If the Loyalty backend needs to call the Core Wallet service, it **must** route its call outbound through the public Core API Gateway, triggering full edge WAF inspection and Keycloak token checks!
+
+---
+
+### 15.3 Compute & Resource Isolation (Dedicated Node Pools)
+
+To prevent a resource leak (e.g. a JVM out-of-memory or infinite loop) in a vendor's Mini App from starving your critical Core bank or payment services, enforce physical compute boundaries using **Azure Node Pools**.
+
+1. **Dedicated User Node Pools**:
+   * **System Node Pool** (`systempool`): Reserved exclusively for Core Kubernetes system services, KrakenD, and Core microservices.
+   * **Mini App Node Pool** (`miniapppool`): Dedicated virtual machines running only guest Mini App backends.
+2. **Kubernetes Taints and Tolerations**:
+   Apply a taint to the Core nodes so that guest apps cannot be scheduled on them:
+   ```bash
+   kubectl taint nodes [core-node-name] tier=core:NoSchedule
+   ```
+   Add the matching toleration *only* to the deployment manifests of your Core microservices.
+3. **Strict Resource Quotas**:
+   Enforce strict CPU and memory `limits` on every Mini App namespace to prevent noisy-neighbor scenarios:
+   ```yaml
+   apiVersion: v1
+   kind: ResourceQuota
+   metadata:
+     name: namespace-limits
+     namespace: miniapp-loyalty
+   spec:
+     hard:
+       requests.cpu: "2"
+       requests.memory: 4Gi
+       limits.cpu: "4"
+       limits.memory: 8Gi
+   ```
+
+---
+
+### 15.4 Secrets & Cloud Resources Isolation (Azure Workload Identity)
+
+Do **NOT** share database connection strings, storage keys, or API secrets across teams.
+
+1. **Azure Workload Identity**:
+   * Bind each Mini App namespace's Kubernetes `ServiceAccount` to a separate **Azure User-Assigned Managed Identity**.
+   * The Loyalty backend pod runs using its own Managed Identity, which is only granted access to its own specific Azure SQL Database and Azure Blob Container. It has **no permission** to read Core database resources.
+2. **Namespace Key Vault Access**:
+   * Use **Azure Key Vault Secrets Provider**. 
+   * Each Mini App namespace mounts secrets from its own dedicated Key Vault instance. Under no circumstances should a Mini App pod be able to access the Core Team's production Key Vault.
+
+
