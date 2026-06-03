@@ -64,4 +64,46 @@ public class WalletController {
             "message", "Wallet points deducted successfully."
         ));
     }
+
+    @PostMapping("/credit")
+    public ResponseEntity<?> creditPoints(
+            @RequestHeader(value = "X-User-Id", required = false) String userId,
+            @RequestHeader(value = "X-Client-Id", required = false) String clientId,
+            @RequestHeader(value = "X-User-Scopes", required = false) String scopes,
+            @RequestBody Map<String, Object> payload) {
+
+        System.out.println("====== CORE AKS BACKEND RECEIVED CREDIT CALL ======");
+        System.out.println("X-User-Id    (User UUID)     : " + userId);
+        System.out.println("X-Client-Id  (Calling Client): " + clientId);
+        System.out.println("X-User-Scopes(Active Scopes) : " + scopes);
+        System.out.println("==========================================");
+
+        // 1. Guard check: Enforce that request came through Gateway
+        if (userId == null || userId.isEmpty() || clientId == null || clientId.isEmpty()) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body("Forbidden: Direct pod access without gateway header verification is blocked.");
+        }
+
+        // 2. Scope verification (expects insurance-scope)
+        if (scopes == null || !scopes.contains("insurance-scope")) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body("Forbidden: Missing insurance-scope required to transact.");
+        }
+
+        // 3. Process business logic (Simulated Wallet Credit)
+        int amountToCredit = (int) payload.getOrDefault("amount", 0);
+        int currentBalance = userBalances.getOrDefault(userId, 1000); // Seed 1000 if new
+
+        int newBalance = currentBalance + amountToCredit;
+        userBalances.put(userId, newBalance);
+
+        return ResponseEntity.ok(Map.of(
+            "status", "SUCCESS",
+            "userId", userId,
+            "transactingClient", clientId,
+            "creditedAmount", amountToCredit,
+            "remainingBalance", newBalance,
+            "message", "Wallet points credited successfully."
+        ));
+    }
 }

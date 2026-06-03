@@ -39,6 +39,27 @@
           }
         }
       ]
+    },
+    {
+      "name": "insurance-scope",
+      "protocol": "openid-connect",
+      "attributes": {
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Access insurance points system"
+      },
+      "protocolMappers": [
+        {
+          "name": "insurance-audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "mini-app-insurance-rewards",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
     }
   ],
   "clients": [
@@ -58,7 +79,8 @@
       "directAccessGrantsEnabled": true,
       "optionalClientScopes": [],
       "defaultClientScopes": [
-        "loyalty-scope"
+        "loyalty-scope",
+        "insurance-scope"
       ]
     },
     {

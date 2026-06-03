@@ -36,6 +36,8 @@ class HostShellScreen extends StatefulWidget {
 class _HostShellScreenState extends State<HostShellScreen> {
   universal_webview.WebViewController? _webViewController;
   String _masterAccessToken = "Awaiting Login...";
+  String _masterRefreshToken = "";
+  String _currentMiniAppUrl = "http://localhost:5000";
   String _telemetryLogs = "[Telemetry Core] Booting Host App Shell...\n";
   bool _isLoggedIn = false;
 
@@ -75,9 +77,10 @@ class _HostShellScreenState extends State<HostShellScreen> {
         final Map<String, dynamic> data = jsonDecode(response.body);
         setState(() {
           _masterAccessToken = data['access_token'];
+          _masterRefreshToken = data['refresh_token'] ?? "";
           _isLoggedIn = true;
         });
-        _logTelemetry("User logged in successfully! Master JWT obtained.");
+        _logTelemetry("User logged in successfully! Master JWT & Refresh Token obtained.");
       } else {
         _logTelemetry("Login Failed: Status ${response.statusCode} - ${response.body}");
       }
@@ -86,22 +89,21 @@ class _HostShellScreenState extends State<HostShellScreen> {
     }
   }
 
-  // 2. Perform OAuth 2.0 Scoped Token exchange against Keycloak on behalf of Guest Mini App
-  Future<String> _executeKeycloakTokenExchange(List<dynamic> scopes) async {
+  // 2. Perform standard OAuth 2.0 Scope Down using Refresh Token on behalf of Guest Mini App
+  Future<String> _executeKeycloakScopeDown(List<dynamic> scopes) async {
     if (!_isLoggedIn) {
       throw Exception("User is not authenticated in Host App.");
     }
 
-    _logTelemetry("Bridge request: Initiating OIDC scope exchange for [loyalty-scope]...");
+    _logTelemetry("Bridge request: Initiating standard OIDC scope refresh scope down for ${scopes.join(", ")}...");
 
     final response = await http.post(
       Uri.parse("$keycloakBaseUrl/token"),
       headers: {"Content-Type": "application/x-www-form-urlencoded"},
       body: {
-        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "grant_type": "refresh_token",
         "client_id": "flutter-host-app",
-        "subject_token": _masterAccessToken,
-        "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        "refresh_token": _masterRefreshToken,
         "scope": scopes.join(" "),
       },
     );
@@ -110,7 +112,7 @@ class _HostShellScreenState extends State<HostShellScreen> {
       final Map<String, dynamic> data = jsonDecode(response.body);
       return data['access_token']; // Returns Scoped Micro-JWT
     } else {
-      throw Exception("Exchange rejected: Status ${response.statusCode} - ${response.body}");
+      throw Exception("Scope down rejected: Status ${response.statusCode} - ${response.body}");
     }
   }
 
@@ -154,7 +156,42 @@ class _HostShellScreenState extends State<HostShellScreen> {
                     const Text("Master VNet ID: keycloak:8080", style: TextStyle(color: Colors.white38, fontSize: 11)),
                   ],
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 6),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      "Active Mini App Sandbox:",
+                      style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueAccent, fontSize: 12),
+                    ),
+                    DropdownButton<String>(
+                      value: _currentMiniAppUrl,
+                      dropdownColor: const Color(0xFF0F172A),
+                      underline: Container(),
+                      isDense: true,
+                      style: const TextStyle(fontSize: 11, color: Colors.white, fontWeight: FontWeight.bold),
+                      items: const [
+                        DropdownMenuItem(
+                          value: "http://localhost:5000",
+                          child: Text("1. Loyalty Rewards (Model 2/3 - Exchange)"),
+                        ),
+                        DropdownMenuItem(
+                          value: "http://localhost:5000/points.html",
+                          child: Text("2. Insurance Points (Model 1 - Direct Core)"),
+                        ),
+                      ],
+                      onChanged: (String? newUrl) {
+                        if (newUrl != null) {
+                          setState(() {
+                            _currentMiniAppUrl = newUrl;
+                          });
+                          _logTelemetry("Navigating WebView to: $newUrl");
+                        }
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
                 const Text(
                   "Platform Telemetry Logs:",
                   style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blueAccent, fontSize: 12),
@@ -188,7 +225,7 @@ class _HostShellScreenState extends State<HostShellScreen> {
                 border: Border(top: BorderSide(color: Colors.white10, width: 2)),
               ),
               child: universal_webview.createWebView(
-                initialUrl: "http://localhost:5000",
+                initialUrl: _currentMiniAppUrl,
                 onMessageReceived: (rawJson) async {
                   final Map<String, dynamic> request = jsonDecode(rawJson);
                   final String requestId = request['requestId'];
@@ -200,8 +237,8 @@ class _HostShellScreenState extends State<HostShellScreen> {
                     try {
                       final scopes = request['params']['scopes'] ?? [];
                       
-                      // 1. Execute genuine OIDC scope token exchange against Keycloak
-                      final String scopedToken = await _executeKeycloakTokenExchange(scopes);
+                      // 1. Execute standard OIDC scope down via Refresh Token against Keycloak
+                      final String scopedToken = await _executeKeycloakScopeDown(scopes);
                       
                       // 2. Generate dynamic, short-lived ephemeral exchange code (Layer 5)
                       final int randomId = DateTime.now().millisecondsSinceEpoch % 1000000;

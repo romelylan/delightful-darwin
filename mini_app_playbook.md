@@ -974,6 +974,12 @@ If you deploy a service mesh in AKS:
 
 This section details exactly how Keycloak supports: **(1) From the Host App to the Guest Mini App (Client-side)**, and **(2) From the Mini App's backend to the Core Mobile Team's backend microservices (Server-side)** using native Keycloak configurations.
 
+> [!IMPORTANT]
+> **Separation of Scope-Down and Token-Exchange Grants**
+> To minimize configuration overhead and strictly isolate vendor trust boundaries, our architecture enforces a clear separation between client-side and server-side token delegation:
+> * **Client-Side Scope-Down (For all models, including Model 1 & 2):** The Flutter Host App requests client-scoped access tokens (e.g., `loyalty-scope`, `insurance-scope`) for WebView sandboxes using the standard **OAuth 2.0 Refresh Token Grant (`grant_type=refresh_token`)**. This is a standard OIDC capability and requires **zero security policies** or client credentials inside Keycloak.
+> * **Server-Side Core Delegation (Strictly for Vendor Model 2 & 3 backends):** The vendor backend exchanges the scoped token for a delegated core JWT using the **OAuth 2.0 Token Exchange (`grant_type=token-exchange` / RFC 8693)** to transact with Core APIs. This is the only flow that requires Keycloak's Token Exchange feature flag and fine-grained cross-client authorization policy configurations.
+
 ### 11.1 Keycloak Client Topology Design
 To orchestrate this safely inside your Keycloak Realm, you must register three distinct Keycloak Client Definitions:
 
@@ -1008,7 +1014,7 @@ sequenceDiagram
     User->>MiniApp: Launch / Request Token
     MiniApp->>Host: JS-Bridge Request: sdk.auth.getToken()
     activate Host
-    Host->>Keycloak: Silent Token Exchange (scope=loyalty-scope)
+    Host->>Keycloak: Standard Refresh Token Scope Down (scope=loyalty-scope)
     Keycloak-->>Host: Return Scoped JWT Token
     Host->>Host: Generate Ephemeral Code (code_guest_xxxx, 30s TTL)
     Host->>Gateway: Backchannel POST /api/gateway/register-code (code -> JWT)
@@ -1036,7 +1042,7 @@ sequenceDiagram
    * **Name:** `loyalty-audience-mapper`
    * **Included Client Audience:** `mini-app-loyalty-rewards`
 3. Associate this Client Scope with the `flutter-host-app` client as **Optional** (or **Default**).
-4. When the user logs in, the host app obtains its master token. When a Mini App boots up and calls `getToken()`, the Flutter Host App executes a silent token refresh exchange request to Keycloak specifying `scope=loyalty-scope`, obtaining a JWT containing:
+4. When the user logs in, the host app obtains its master access token and master refresh token. When a Mini App boots up and calls `getToken()`, the Flutter Host App executes a standard OIDC refresh token scope-down request to Keycloak specifying `scope=loyalty-scope`, obtaining a JWT containing:
    ```json
    {
      "iss": "https://keycloak.yourdomain.com/realms/production",
@@ -1129,7 +1135,7 @@ In the Client-Side sequence diagram (**Flow 1**), the Guest Mini App's JavaScrip
  1. const code = await sdk.getToken();                             │                                             │
     [Generates req_16849, returns Pending Promise]                 │                                             │
               │── 2. window.flutter.postMessage(req_16849) ───────>│                                             │
-              │                                                    │ [Processes Keycloak Exchange]               │
+              │                                                    │ [Executes Refresh Scope Down]               │
               │                                                    │ [Retrieves Scoped Micro-JWT]                │
               │                                                    │ [Generates code_guest_xxxx]                 │
               │                                                    │                                             │
@@ -1209,8 +1215,8 @@ onMessageReceived: (rawJson) async {
     try {
       final scopes = request['params']['scopes'] ?? [];
       
-      // 1. Execute OIDC scope token exchange against Keycloak
-      final String scopedToken = await _executeKeycloakTokenExchange(scopes);
+      // 1. Execute standard OIDC scope down via Refresh Token against Keycloak
+      final String scopedToken = await _executeKeycloakScopeDown(scopes);
       
       // 2. Generate dynamic, short-lived ephemeral exchange code (30s TTL)
       final int randomId = DateTime.now().millisecondsSinceEpoch % 1000000;
@@ -1336,9 +1342,9 @@ local-mini-app-poc/
 | **`keycloak`** | `8080` | Keycloak 24 IAM Server running standard OIDC / RFC 8693 endpoints |
 | **`core-gateway`** | `9000` | Spring Cloud Edge Ingress Gateway doing JWKS validation & Header Propagation |
 | **`mini-app-be`** | `8081` | Spring Boot Mini App Backend executing basic-auth token exchange |
-| **`core-be`** | `8082` | Spring Boot Core Backend doing wallet deductions via trusted headers |
-| **`guest-webapp`** | `5000` | NGINX static server serving the Mini App SPA bundle (Edge CDN Mock) |
-| **`flutter-host`** | `5000+` | Flutter Host Mobile App Shell running on Chrome |
+| **`core-be`** | `8082` | Spring Boot Core Backend doing wallet actions (deduct/credit) via trusted headers |
+| **`guest-webapp`** | `5000` | Mock CDN hosting "Loyalty Rewards" (`/index.html`) & "Insurance Points" (`/points.html`) |
+| **`flutter-host`** | `5000+` | Flutter Host Mobile App Shell with dynamic sandbox toggle controls |
 
 ---
 
@@ -1556,19 +1562,55 @@ sequenceDiagram
 4. **Expected Result:** Every subsequent click succeeds seamlessly without invoking the Host App's JS-Bridge again!
    *During the first exchange, the Ingress Gateway caches the resolved JWT inside the server-side `WebSession` and returns a secure cookie. Subsequent calls automatically transmit this cookie, and the Gateway resolves the token statefully.*
 
-#### 5. Verify the Propagated Downstream Headers
-To verify that the Core AKS service successfully received the offloaded trusted user context, execute:
-```powershell
-docker logs -f poc-core-be
+###### Mode 4: Model 1 Scope-Down Flow (Direct Core API - "Insurance Points")
+This mode demonstrates the **Model 1 (Core Team Hosting)** architecture. The frontend uses standard OIDC refresh scope-down to request the `insurance-scope` token, and calls the Core Backend directly via the Gateway `/api/wallet/credit` endpoint—with **no server-side token exchange**.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant MiniApp as Guest Mini App (JS)
+    participant Host as Flutter Host App (Dart)
+    participant Gateway as API Ingress Gateway
+    participant Backend as Core Backend (Spring)
+
+    User->>MiniApp: Click "1. Request Scoped Token..."
+    MiniApp->>Host: JS-Bridge Request: auth.getToken()
+    activate Host
+    Host->>Host: Standard Refresh Token Scope Down (scope=insurance-scope)
+    Host->>Gateway: Backchannel POST /api/gateway/register-code (code -> JWT)
+    Gateway-->>Host: 200 OK (Registered)
+    Host-->>MiniApp: Resolve with code_guest_xxxx
+    deactivate Host
+    
+    User->>MiniApp: Click "2. Credit 200 Wallet Points..."
+    MiniApp->>Gateway: POST /api/wallet/credit (Authorization: Bearer code_guest_xxxx)
+    activate Gateway
+    Gateway->>Gateway: Swapping filter intercepts, retrieves JWT & deletes code
+    Gateway->>Gateway: Validate JWT & Propagate trusted headers
+    Gateway->>Backend: Forward POST /credit with X-User-Id, X-User-Scopes headers
+    activate Backend
+    Backend->>Backend: Verify insurance-scope & credit points
+    Backend-->>Gateway: 200 Success Response
+    deactivate Backend
+    Gateway-->>MiniApp: 200 Success Response
+    deactivate Gateway
 ```
-**Expected Downstream Log Signature:**
-```
-====== CORE AKS BACKEND RECEIVED CALL ======
-X-User-Id    (User UUID)     : 48da6d26-bacb-44e5-bca7-231b1438c919
-X-Client-Id  (Calling Client): mini-app-loyalty-rewards
-X-User-Scopes(Active Scopes) : loyalty-scope
-==========================================
-```
+
+1. Select **`2. Insurance Points (Model 1 - Direct Core)`** in the Flutter Host App's top dropdown to navigate the WebView to `points.html`.
+2. Click **`1. Request Scoped Token...`** to fetch the scoped exchange code.
+3. Click **`2. Credit 200 Wallet Points (Direct Core API)`**.
+4. **Expected Result:** Points are credited successfully! In `docker logs -f poc-core-be`, you will see:
+   ```
+   ====== CORE AKS BACKEND RECEIVED CREDIT CALL ======
+   X-User-Id    (User UUID)     : 48da6d26-bacb-44e5-bca7-231b1438c919
+   X-Client-Id  (Calling Client): flutter-host-app
+   X-User-Scopes(Active Scopes) : insurance-scope
+   ==========================================
+   ```
+   *This proves that the Model 1 app directly invoked the Core Backend via header propagation, without any Keycloak token exchange backend execution.*
+
+---
 
 This successfully validates that our central architectural goals—**strict isolation, cryptographic offloading, dynamic scope delegation, and header propagation**—are fully realized and production-ready!
 

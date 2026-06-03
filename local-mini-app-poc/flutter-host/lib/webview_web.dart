@@ -68,6 +68,14 @@ class _WebWebViewWidgetState extends State<WebWebViewWidget> {
     });
   }
 
+  @override
+  void didUpdateWidget(WebWebViewWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.initialUrl != oldWidget.initialUrl) {
+      _iframe.src = widget.initialUrl;
+    }
+  }
+
   void _handleMessage(html.Event event) {
     final messageEvent = event as html.MessageEvent;
     if (messageEvent.data is String) {

@@ -24,6 +24,10 @@ import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 import org.springframework.security.core.context.SecurityContext;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
+import org.springframework.web.server.session.WebSessionIdResolver;
+import org.springframework.web.server.session.CookieWebSessionIdResolver;
+import org.springframework.web.cors.reactive.CorsWebFilter;
+import org.springframework.http.server.reactive.ServerHttpResponse;
 
 import java.util.Map;
 import java.util.List;
@@ -76,8 +80,24 @@ class SecurityConfig {
     @Bean
     public SecurityWebFilterChain springSecurityFilterChain(ServerHttpSecurity http) {
         http
-            .cors(cors -> cors.configurationSource(corsConfigurationSource()))
             .csrf(csrf -> csrf.disable())
+            .exceptionHandling(exceptions -> exceptions
+                .authenticationEntryPoint((exchange, e) -> Mono.defer(() -> {
+                    ServerHttpResponse response = exchange.getResponse();
+                    response.setStatusCode(HttpStatus.UNAUTHORIZED);
+                    try {
+                        response.getHeaders().set(org.springframework.http.HttpHeaders.WWW_AUTHENTICATE, "Bearer");
+                    } catch (UnsupportedOperationException ex) {
+                        // Gracefully ignore if headers are already read-only/committed
+                    }
+                    return response.setComplete();
+                }))
+                .accessDeniedHandler((exchange, denied) -> Mono.defer(() -> {
+                    ServerHttpResponse response = exchange.getResponse();
+                    response.setStatusCode(HttpStatus.FORBIDDEN);
+                    return response.setComplete();
+                }))
+            )
             .authorizeExchange(exchanges -> exchanges
                 // Restrict wallet and rewards claim endpoints to authenticated Keycloak tokens
                 .pathMatchers("/api/wallet/**", "/api/rewards/claim").authenticated()
@@ -99,6 +119,23 @@ class SecurityConfig {
             new org.springframework.web.cors.reactive.UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", configuration);
         return source;
+    }
+
+    @Bean
+    public CorsWebFilter corsWebFilter() {
+        return new CorsWebFilter(corsConfigurationSource());
+    }
+
+    @Bean
+    public WebSessionIdResolver webSessionIdResolver() {
+        CookieWebSessionIdResolver resolver = new CookieWebSessionIdResolver();
+        resolver.setCookieName("SESSION");
+        resolver.addCookieInitializer(builder -> {
+            builder.path("/");
+            builder.sameSite("None");
+            builder.secure(true);
+        });
+        return resolver;
     }
 }
 
@@ -181,17 +218,20 @@ class TokenSwappingWebFilter implements WebFilter {
         // Case 2: Stateful Cookie Sessions (Pattern A)
         // If Authorization header is missing, resolve the user's token directly from the Gateway's server-side WebSession
         if (authHeader == null || authHeader.trim().isEmpty()) {
-            return exchange.getSession().flatMap(session -> {
-                String cachedJwt = (String) session.getAttribute("SCOPED_TOKEN");
-                if (cachedJwt != null) {
-                    System.out.println("====== API GATEWAY STATEFUL: Resolved token from WebSession! Injecting Bearer Header... ======");
-                    ServerWebExchange mutatedExchange = exchange.mutate()
-                        .request(r -> r.header("Authorization", "Bearer " + cachedJwt))
-                        .build();
-                    return chain.filter(mutatedExchange);
-                }
-                return chain.filter(exchange);
-            }).switchIfEmpty(chain.filter(exchange));
+            if (exchange.getRequest().getCookies().containsKey("SESSION")) {
+                return exchange.getSession().flatMap(session -> {
+                    String cachedJwt = (String) session.getAttribute("SCOPED_TOKEN");
+                    if (cachedJwt != null) {
+                        System.out.println("====== API GATEWAY STATEFUL: Resolved token from WebSession! Injecting Bearer Header... ======");
+                        ServerWebExchange mutatedExchange = exchange.mutate()
+                            .request(r -> r.header("Authorization", "Bearer " + cachedJwt))
+                            .build();
+                        return chain.filter(mutatedExchange);
+                    }
+                    return chain.filter(exchange);
+                }).switchIfEmpty(chain.filter(exchange));
+            }
+            return chain.filter(exchange);
         }
         
         return chain.filter(exchange);
