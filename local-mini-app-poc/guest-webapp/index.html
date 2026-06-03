@@ -201,6 +201,18 @@
       <div class="subtitle">Model 2 Sandbox Mini-App (Vite / SPA Mock)</div>
     </header>
 
+    <!-- Demo Strategy Selector Dropdown -->
+    <div class="card" style="margin-bottom: 15px; border: 1px solid rgba(56, 189, 248, 0.25); padding: 15px;">
+      <div style="font-size: 11px; font-weight: 700; margin-bottom: 8px; color: var(--primary); text-transform: uppercase; letter-spacing: 0.05em;">
+        Demo Strategy Selector (Dynamic Handshake)
+      </div>
+      <select id="demoModeSelector" style="width: 100%; padding: 10px; border-radius: 8px; background: #0f172a; border: 1px solid rgba(255,255,255,0.15); color: #f1f5f9; font-size: 12px; font-weight: 500; cursor: pointer; outline: none;" onchange="changeDemoMode()">
+        <option value="strict-one-time">Pattern B-1: Strict One-Time Code (Manual Replay Demo)</option>
+        <option value="silent-refresh">Pattern B-2: Stateless SDK Silent Refresh (Seamless SDK Flow)</option>
+        <option value="stateful-session">Pattern A: Stateful Session Cookies (Seamless Backend State)</option>
+      </select>
+    </div>
+
     <div class="card">
       <button class="btn" id="btnRequestToken" onclick="fetchTokenFromHost()">
         1. Request Scoped Token from Host App
@@ -308,11 +320,21 @@
     // -------------------------------------------------------------
     // BUTTON ACTIONS
     // -------------------------------------------------------------
+    let currentMode = "strict-one-time";
+    let sessionEstablished = false;
+
+    function changeDemoMode() {
+      currentMode = document.getElementById("demoModeSelector").value;
+      activeToken = null;
+      sessionEstablished = false;
+      logConsole(`Changed demo strategy to: '${currentMode.toUpperCase()}' (Cache cleared)`, "system");
+    }
 
     async function fetchTokenFromHost() {
       try {
         logConsole("Requesting OIDC exchange scoped token...", "normal");
         
+        sessionEstablished = false;
         // Triggers the JS-Bridge evaluateJavascript promise handshake
         activeToken = await hostAppSdk.auth.getToken(["loyalty-scope"]);
         
@@ -330,21 +352,33 @@
     }
 
     async function claimLoyaltyReward() {
-      if (!activeToken) {
+      // B-2: Stateless SDK Silent Refresh Strategy
+      if (currentMode === "silent-refresh") {
+        logConsole("[SDK FLOW] Executing SILENT REFRESH: Fetching fresh temp code dynamically before transaction...", "system");
+        await fetchTokenFromHost();
+      }
+
+      if (!activeToken && !sessionEstablished) {
         logConsole("Authentication required. Please request token first.", "error");
         return;
       }
 
-      logConsole("Sending claim reward request to Mini App Backend on port 8081...", "normal");
+      logConsole(`Sending claim request to Backend (Strategy: ${currentMode.toUpperCase()})...`, "normal");
       
       try {
+        const headers = {
+          "Content-Type": "application/json"
+        };
+        if (activeToken) {
+          headers["Authorization"] = `Bearer ${activeToken}`;
+        }
+
         // Triggers the Backend two-step validation flow
-        const response = await fetch("http://localhost:8081/api/rewards/claim", {
+        const response = await fetch("http://localhost:9000/api/rewards/claim", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${activeToken}` // Injects Scoped Micro-JWT
-          },
+          headers: headers,
+          // Pattern A: Stateful Cookie Session requires passing credentials cross-origin
+          credentials: currentMode === "stateful-session" ? "include" : "omit",
           body: JSON.stringify({
             rewardName: "Insurance Premium Upgrade Discount (100 pts)"
           })
@@ -357,6 +391,12 @@
           logConsole(`Item    : ${data.rewardItem}`, "success");
           logConsole(`Wallet  : ${data.coreWalletResult.message}`, "success");
           logConsole(`Balance : ${data.coreWalletResult.remainingBalance} pts`, "success");
+          
+          if (currentMode === "stateful-session") {
+            sessionEstablished = true;
+            activeToken = null; // Clear token from JS memory!
+            logConsole("[STATEFUL SESSION] Token cleared from JS memory. Subsequent claims rely purely on browser cookies!", "system");
+          }
         } else {
           logConsole(`Claim Failed: ${data.error} - ${data.details}`, "error");
         }

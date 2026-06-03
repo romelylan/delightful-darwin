@@ -200,15 +200,41 @@ class _HostShellScreenState extends State<HostShellScreen> {
                     try {
                       final scopes = request['params']['scopes'] ?? [];
                       
-                      // Execute genuine OIDC scope token exchange against Keycloak
+                      // 1. Execute genuine OIDC scope token exchange against Keycloak
                       final String scopedToken = await _executeKeycloakTokenExchange(scopes);
                       
-                      _logTelemetry("Keycloak Exchange success. Dispatching response...");
+                      // 2. Generate dynamic, short-lived ephemeral exchange code (Layer 5)
+                      final int randomId = DateTime.now().millisecondsSinceEpoch % 1000000;
+                      final String tempCode = "code_guest_$randomId";
+                      _logTelemetry("Token acquired. Registering secure temp code: $tempCode");
                       
+                      // 3. Securely register the code to the Mini App Backend over the backchannel
+                      try {
+                        final String registerUrl = "http://localhost:9000/api/gateway/register-code";
+                        final regResponse = await http.post(
+                          Uri.parse(registerUrl),
+                          headers: {"Content-Type": "application/json"},
+                          body: jsonEncode({
+                            "code": tempCode,
+                            "token": scopedToken,
+                          }),
+                        );
+                        
+                        if (regResponse.statusCode == 200) {
+                          _logTelemetry("Code registered to Backend. Dispatching code to Webview...");
+                        } else {
+                          throw Exception("Backend rejected registration: Status ${regResponse.statusCode}");
+                        }
+                      } catch (err) {
+                        _logTelemetry("Backchannel registration error: ${err.toString()}");
+                        throw Exception("Failed to secure temp code on backend.");
+                      }
+                      
+                      // 4. Return the ephemeral code instead of the raw JWT to the WebView context
                       _webViewController?.postMessage(jsonEncode({
                         'requestId': requestId,
                         'status': 'success',
-                        'token': scopedToken,
+                        'token': tempCode,
                       }));
                       
                     } catch (e) {

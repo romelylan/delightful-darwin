@@ -75,6 +75,12 @@ class _WebWebViewWidgetState extends State<WebWebViewWidget> {
       try {
         final Map<String, dynamic> data = jsonDecode(rawJson);
         if (data.containsKey('requestId') && data.containsKey('action')) {
+          // Layer 3: Strict Origin Verification for postMessage Handshake
+          final String trustedOrigin = "http://localhost:5000";
+          if (messageEvent.origin != trustedOrigin) {
+            print("SECURITY WARNING: Blocked OIDC token request from unauthorized origin: '${messageEvent.origin}'");
+            return;
+          }
           widget.onMessageReceived(rawJson);
         }
       } catch (_) {

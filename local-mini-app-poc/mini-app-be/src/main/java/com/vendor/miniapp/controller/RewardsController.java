@@ -7,6 +7,7 @@ import org.springframework.util.MultiValueMap;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
+import jakarta.servlet.http.HttpServletRequest;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -14,7 +15,6 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/rewards")
-@CrossOrigin(origins = "*") // Allow WebView cross-origin requests
 public class RewardsController {
 
     private final RestTemplate restTemplate;
@@ -31,6 +31,7 @@ public class RewardsController {
 
     @PostMapping("/claim")
     public ResponseEntity<?> claimReward(
+            HttpServletRequest request,
             @RequestHeader(value = "Authorization", required = false) String authorizationHeader,
             @RequestBody Map<String, Object> payload) {
 
@@ -38,12 +39,15 @@ public class RewardsController {
         System.out.println("Authorization Header: " + (authorizationHeader != null ? "PRESENT" : "MISSING"));
         System.out.println("==================================================");
 
-        if (authorizationHeader == null || !authorizationHeader.startsWith("Bearer ")) {
+        String microToken = null;
+        if (authorizationHeader != null && authorizationHeader.startsWith("Bearer ")) {
+            microToken = authorizationHeader.substring(7);
+        }
+
+        if (microToken == null) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                     .body(Map.of("error", "Unauthorized", "message", "Missing or invalid Bearer micro-token."));
         }
-
-        String microToken = authorizationHeader.substring(7);
 
         try {
             // ==========================================

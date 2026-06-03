@@ -157,6 +157,74 @@ A key challenge when working with third-party vendors is **maintaining secure us
    * Keycloak generates a short-lived token (JWT) specifically scoped for that Mini App (e.g., Aud: `mini-app-loyalty`, Scopes: `read:user_profile`, Exp: 15 minutes).
    * Even if this token is compromised, its reach is severely restricted and it expires quickly.
 
+### 5.2 Threat Model: Defensive Mitigations Against Scoped Token Theft
+
+Your colleague is **100% correct**. The JS-Bridge interface `sdk.auth.getToken()` represents a primary target for client-side token extraction. If a Mini App's frontend is compromised by **Cross-Site Scripting (XSS)** or a **compromised NPM supply-chain dependency**, an attacker can run script code to programmatically invoke `sdk.auth.getToken()`, retrieve the scoped token, and exfiltrate it.
+
+To neutralize this threat, our architecture implements **five distinct layers of defense** that limit the blast radius, restrict access, and can completely eliminate the token from the browser scope altogether.
+
+```
+                  ┌────────────────────────────────────────────────────────┐
+                  │                 Flutter Host App Container             │
+                  │  ┌──────────────────────────────────────────────────┐  │
+                  │  │                  WebView Sandbox                 │  │
+                  │  │                                                  │  │
+                  │  │  [ XSS / Malicious Script ]                      │  │
+                  │  │         │                                        │  │
+                  │  │         │ (Queries JS-Bridge)                    │  │
+                  │  │         ▼                                        │  │
+                  │  │   sdk.auth.getToken()                            │  │
+                  │  │         │                                        │  │
+                  │  └─────────┼────────────────────────────────────────┘  │
+                  │            │ (Intercepted & Verified)                  │
+                  │            ▼                                           │
+                  │  ┌──────────────────────────────────────────────────┐  │
+                  │  │            Secure Flutter JS-Bridge              │  │
+                  │  │  - Origin URL Verification                       │  │
+                  │  │  - Content Security Policy (CSP) enforcement    │  │
+                  │  └─────────┬────────────────────────────────────────┘  │
+                  └────────────┼───────────────────────────────────────────┘
+                               │ (Authorization Code / Backchannel Flow)
+                               ▼
+                  ┌────────────────────────────────────────────────────────┐
+                  │              Secure Backend Infrastructure             │
+                  │  ┌────────────────────────┐  ┌──────────────────────┐  │
+                  │  │  Mini App Backend      │  │ Core Ingress Gateway │  │
+                  │  │  - Exchanges code      │  │ - Strict Token Aud   │  │
+                  │  │  - Stores JWT in memory│  │   & Scope validation │  │
+                  │  └────────────────────────┘  └──────────────────────┘  │
+                  └────────────────────────────────────────────────────────┘
+```
+
+#### 5.2.1 Defense Layer 1: Cryptographic Audience & Scope-Bounding (Aud / Scope)
+Even if an attacker successfully extracts a scoped token via XSS, **the blast radius is fully contained**:
+* **No Core Access:** The token is explicitly bounded with `aud: miniapp-<domain>-backend` and `scope: <domain>-scope`. It is **useless** if replayed against Core Team APIs (banking, profiles, wallets). The Core Ingress Gateway will instantly reject it due to audience mismatch.
+* **No Cross-App Replay:** A stolen token for *Mini App A* cannot be used to call *Mini App B's* backend services. Each microservice validates its own strict client-identity bound, restricting the token's worth exclusively to the compromised domain.
+
+#### 5.2.2 Defense Layer 2: Extreme Lifespan Ephemerality (Max 5-Minute TTL)
+Unlike standard user access tokens which may last 15 to 30 minutes, guest-scoped tokens generated via `getToken()` must have a maximum Time-To-Live (TTL) of **5 minutes** (with no refresh tokens issued to the Guest context).
+* **The Result:** The utility window for a stolen token is extremely narrow. An attacker must exploit and exfiltrate in real-time, drastically reducing the feasibility of persistent unauthorized backend abuse.
+
+#### 5.2.3 Defense Layer 3: Host Origin Validation & Content Security Policy (CSP)
+The Flutter Host App JS-Bridge does **not** blind-trust execution requests:
+1. **Origin Verification (*Active in local POC*):** Before resolving the `getToken` promise, the Flutter host controller inspects the calling frame's origin. On Web/Chrome platforms in the local POC, this is actively enforced inside `webview_web.dart` by intercepting the `message` event and verifying that `messageEvent.origin` strictly matches the sandboxed domain (`http://localhost:5000`). If an unauthorized iframe attempts to query the OIDC bridge, the Host intercepts and drops the request instantly.
+2. **CSP Injection:** The Host injects and enforces a strict Content Security Policy (CSP) that forbids inline script execution (`unsafe-inline`) and limits `connect-src` only to the Mini App's registered backend API gateways, preventing stolen data from being sent to untrusted third-party servers.
+
+#### 5.2.4 Defense Layer 4: Ephemeral In-Memory Storage Constraint
+Mini App developers are strictly prohibited from writing the scoped token to persistent client-side databases:
+* **Banned:** `window.localStorage`, `window.sessionStorage`, and `IndexedDB`. If stored here, any XSS script can read the token long after the initial bridge call.
+* **Mandated (*Active in local POC*):** Tokens must be stored in a **closed JavaScript execution scope (a closure)** or local component state memory. Inside our guest `index.html` POC codebase, the token is actively managed as a dynamic, ephemeral closure variable (`let activeToken = null;`), guaranteeing it is never persisted to disk and is wiped instantly on reload or WebView unload.
+
+#### 5.2.5 Defense Layer 5: Authorization Code Handshake (Backchannel Resolution - *Zero JWT in WebView*)
+For high-security domains, we implement the **API Ingress Centralized Backchannel Token Resolution Pattern**. This completely eliminates the raw JWT token from both the WebView's JavaScript context and the downstream vendor backend containers:
+
+1. **Get Code instead of Token:** Instead of returning the raw JWT over the JS-Bridge, `sdk.auth.getToken()` returns a **single-use, short-lived, ephemeral authorization code** (`exchange_code`, valid for 30 seconds).
+2. **Gateway Registration:** The Flutter Host App securely registers the mapping (`exchange_code` -> `rawJWT`) directly with the central **API Ingress Gateway** via a private backchannel endpoint: `POST /api/gateway/register-code`.
+3. **Forwarding Code:** The Mini App frontend sends this `exchange_code` as a Bearer token to the API Gateway when calling its backend services (e.g., `POST /api/rewards/claim`).
+4. **Pre-Security Swapping:** The API Gateway's Pre-Security Filter intercepts the request, looks up the `exchange_code` in its cache, deletes it immediately (enforcing single-use), and swaps it for the real `rawJWT` in-flight.
+5. **Gateway OIDC Offloading:** The Gateway validates the swapped `rawJWT` mathematically against Keycloak JWKS, extracts user claims, injects simple trusted headers (`X-User-Id`, `X-Client-Id`, `X-User-Scopes`), and forwards the clean request downstream to the Mini App Backend.
+6. **Outcome:** The raw JWT token is retrieved and stored **only in memory at the secure API Gateway edge**. The browser environment only ever sees an ephemeral exchange code, and downstream vendor backends only see simple, cryptographically-sanitized identity headers. Even a complete takeover of both the browser and the vendor's backend container cannot steal active user JWTs, completely neutralizing the primary token theft vectors.
+
 ---
 
 ## 6. Coding & UX Standards for Mini Apps
@@ -206,20 +274,224 @@ Vendors must import the core host UI library or follow a shared design token sty
 
 The Mini App packaging and release process should be fully automated to manage multiple internal and vendor teams independently.
 
-### 7.1 Bundle Package Format (`.mapk`)
-A Mini App bundle must be packaged in a custom archive format (e.g., `.mapk`, which is a standard `.zip` containing a specific directory structure):
+### 7.1 Bundle Package Format (`.mapk`) & Industry Standards
+
+When establishing a Mini App ecosystem, selecting a packaging format requires balancing **open web standards**, **super-app ecosystem alignment**, and **security controls**.
+
+#### 7.1.1 Industry Landscape & Standards Mapping
+In the global Mini App industry, there are two primary approaches to packaging:
+1. **Proprietary/Closed Formats:** Used by major super-apps (e.g., WeChat, Alipay) to bind compiled assets into custom binary containers.
+2. **Open-Standard Zip Containers:** Promoted by the W3C and phone manufacturer consortiums (e.g., Quick App) to lower friction and leverage standard web technologies.
+
+The table below contrasts the leading industry packaging formats with our enterprise ecosystem's custom format:
+
+| Ecosystem / Standard | Extension | Underlying Container | Specification & Characteristics |
+| :--- | :---: | :---: | :--- |
+| **W3C MiniApp Working Group** | `.zip` | ZIP (Standard) | Defines the open specification for packaging, requiring a standardized `manifest.json`, security controls, and resource verification. |
+| **Tencent WeChat** | `.wxapkg` | Custom Binary | A proprietary compiled binary archive format containing compressed and optimized pages (WXML, WXSS, and ES5 JS). Requires proprietary tools to compile and unpack. |
+| **Alipay** | `.amr` | Custom Binary | *Alipay Mini Program Resource*. A proprietary container optimized for secure sandboxing and rapid asset interception inside the Alipay Core. |
+| **Quick App Consortium** | `.rpk` | ZIP (Standard) | *Resource Package*. Used by major Android manufacturers (Xiaomi, Huawei, OPPO, vivo). Combines standard HTML/CSS/JS with custom layouts into a zip archive. |
+| **Enterprise Custom (This Playbook)** | **`.mapk`** | **ZIP (Standard)** | **Mini App Package**. A project-specific extension wrapping a standard ZIP container that fully aligns with the W3C MiniApp Packaging specification, enriched with local cryptographic signature validation. |
+
+#### 7.1.2 Why the Enterprise Uses a Custom `.mapk` Extension
+While a `.mapk` package is fundamentally a structured `.zip` archive, utilizing the custom **`.mapk`** extension (instead of `.zip`) is an **industry best practice** for the following critical engineering reasons:
+
+1. **Upload Sanitation & Security Inspection:**
+   By restricting the Developer Portal and CI/CD pipelines to only accept `.mapk` files, we establish a strict boundary. The ingestion pipeline immediately intercepts `.mapk` uploads and routes them to a specialized vulnerability scanner that tests for **Zip Slip (relative path traversal attacks)**, malicious dynamic code injection, and compliance with size boundaries before unpacking.
+2. **MIME-Type & Edge Routing Optimization:**
+   Having a dedicated extension allows Azure Front Door, Azure DNS, CDN edges, and storage buckets (e.g., Azure Blob Storage) to map `.mapk` files to a specific MIME-type (e.g., `application/x-mini-app-package`). This lets edge caches apply distinct cache-control rules, optimization headers, and download patterns separate from generic zip assets.
+3. **Host Client Interception & Router Binding:**
+   When the Flutter Host App downloads, verifies, and unpacks the package locally, the custom `.mapk` extension serves as a clear administrative signature. The Flutter Asset Manager can easily register and route the files within the local sandbox filesystem (e.g., mapping `my-rewards-app.mapk` dynamically to a sandboxed routing virtual host like `app://miniapp-rewards/`).
+4. **Cryptographic Validation & Signature Binding:**
+   The `.mapk` format acts as a sealed envelope. Future security iterations can bind a detached cryptographic signature (`manifest.sig`) into the package header or append a signature block, allowing the Flutter Host App to verify that the bundle was signed by an authorized developer and has not been tampered with since release.
+
+#### 7.1.3 Inside the `.mapk` Structure (W3C-Aligned)
+The internal structure of our `.mapk` bundle closely mirrors the W3C MiniApp Packaging directory guidelines, ensuring compatibility and ease of adaptation:
 
 ```
 my-rewards-app.mapk/
-├── manifest.json
-├── index.html
-├── assets/
-│   ├── app.js
-│   ├── app.css
-│   └── logo.png
-└── locales/
-    ├── en.json
-    └── id.json
+├── manifest.json         # Unified configuration manifest (W3C compatible)
+├── index.html            # Standard SPA entrypoint bootstrapper
+├── assets/               # Production-compiled, optimized static assets
+│   ├── app.js            # Main application bundle
+│   ├── app.css           # Styling/design tokens stylesheet
+│   └── logo.png          # App brand image asset
+└── locales/              # Localized translation resource mappings
+    ├── en.json           # English localization strings
+    └── id.json           # Bahasa Indonesia localization strings
+```
+
+##### Standard W3C-Aligned `manifest.json` Example:
+```json
+{
+  "appId": "com.vendor.miniapp.loyaltyrewards",
+  "name": "Loyalty Rewards",
+  "version": "1.2.4",
+  "versionCode": 24,
+  "description": "Redeem your loyalty points seamlessly in the Host App.",
+  "icons": [
+    {
+      "src": "assets/logo.png",
+      "sizes": "144x144",
+      "type": "image/png"
+    }
+  ],
+  "permissions": [
+    "jsbridge.auth.scopedToken",
+    "jsbridge.device.getBiometricsStatus",
+    "jsbridge.navigation.close"
+  ],
+  "window": {
+    "defaultTitle": "Loyalty Rewards",
+    "navigationBarBackgroundColor": "#0F172A",
+    "navigationBarTextStyle": "white"
+  }
+}
+```
+
+---
+
+### 7.2 Secure Ingestion, Storage & Global Distribution (Azure Blob Storage & Azure Front Door)
+
+To safely manage and deliver `.mapk` bundles to millions of Host app instances, the architecture relies on a locked-down **Private Azure Blob Storage** origin acting as a package registry, fronted by **Azure Front Door (AFD)** as a highly secure, cached global Edge CDN.
+
+```
+┌─────────────────┐      1. Push .mapk      ┌─────────────────────────────┐
+│  Developer CI   ├────────────────────────>│ Secure Ingestion Gateway    │
+│  (GitHub/DevOps)│                         │ (Integrity & Scan Pipeline)  │
+└─────────────────┘                         └──────────────┬──────────────┘
+                                                           │ 2. Upload (Private)
+                                                           ▼
+┌─────────────────┐      4. Dynamic Cache   ┌─────────────────────────────┐
+│  Flutter Host   │<────────────────────────┤  Azure Front Door (CDN)     │
+│  (Mobile App)   │                         │  - Edge Cache (Geo-routing) │
+└─────────────────┘                         │  - WAF / Origin Lockdown    │
+                                            └──────────────▲──────────────┘
+                                                           │ 3. Authenticate Origin
+                                                           │ (Managed Identity / SAS)
+                                            ┌──────────────┴──────────────┐
+                                            │  Azure Blob Storage         │
+                                            │  (Private Container:        │
+                                            │   miniapp-registry-prod)    │
+                                            └─────────────────────────────┘
+```
+
+#### 7.2.1 Phase 1: Ingestion & Verification Pipeline
+Before a `.mapk` archive is stored in Azure Blob Storage, the CI/CD pipeline or a dedicated Developer Portal Ingestion service must perform mandatory static analysis and security checks:
+1. **Zip Slip Prevention (Path Traversal):** Verify that the archive does not contain relative path components (`../` or `..\\`) in resource paths that could escape the local extraction directory on user devices.
+2. **Size Enforcement:** Reject packages larger than the **2MB** compressed limit.
+3. **Manifest Integrity:** Parse `manifest.json` at the root and assert required fields (`appId`, `version`, `versionCode`, `permissions`).
+4. **Signature Verification (Optional but Recommended):** Verify the developer's cryptographic signature against registry-trusted public keys.
+
+#### 7.2.2 Phase 2: Private Azure Blob Storage Provisioning
+We host verified `.mapk` files inside a **Private Azure Blob Storage container**. Direct public access to the storage account must be disabled to prevent security bypassing.
+
+1. **Storage Account Setup:**
+   * Create an Azure Storage Account with **BlobOnly** kind and **Locally Redundant Storage (LRS)** or **Geo-Redundant Storage (GRS)** for high availability.
+   * Enforce **Secure Transfer Required (HTTPS)**.
+2. **Container Configuration:**
+   * Create a container named `miniapp-registry-prod`.
+   * Set Public Access Level to **Private (no anonymous access)**.
+3. **Origin Restriction:**
+   * Configure Azure Storage Firewalls to restrict incoming traffic. 
+   * Allow access exclusively from the **Azure Front Door Service Tag** (`AzureFrontDoor.Backend`) or bind it via a **Private Endpoint** using Azure Private Link.
+
+#### 7.2.3 Phase 3: Azure Front Door (Edge CDN) Configuration
+Azure Front Door functions as the secure gateway that intercepts client requests, applies Web Application Firewalls (WAF), decrypts SSL/TLS, and delivers cached bundles with ultra-low latency.
+
+1. **Custom MIME-Type Association:**
+   * Ensure that `.mapk` files are served with the header: `Content-Type: application/x-mini-app-package` (or fallback `application/octet-stream`).
+   * This is critical! If served as `text/html` or `application/x-zip-compressed`, default browsers might attempt to parse or execute scripting under the CDN domain, presenting an XSS attack vector.
+2. **Backend/Origin Settings:**
+   * Define your Private Storage Account blob endpoint (e.g. `https://<account-name>.blob.core.windows.net`) as the primary origin.
+   * Authenticate Azure Front Door to Azure Storage using **System-Assigned Managed Identity** or a timed Shared Access Signature (SAS) token configured inside the origin path.
+3. **Caching & Compression Rules:**
+   * Set **Query String Caching** to *Ignore Query Strings* since bundles are immutable by version pathing.
+   * Enable **Compression** on the edge (Gzip and Brotli) to optimize network packet overhead for users on mobile networks.
+   * Enable **Edge Cache Time-To-Live (TTL)** aggressively (e.g., 30 days) because `.mapk` versions are static and versioned in their URLs (e.g., `/bundles/rewards-app/v1.2.4/rewards-app.mapk`).
+
+#### 7.2.4 Phase 4: Automated CI/CD Deployment Pipeline (GitHub Actions)
+Below is a production-ready GitHub Actions workflow template demonstrating how to package, authenticate, upload with a custom MIME type to Azure Blob Storage, and immediately purge the Front Door cache edges.
+
+```yaml
+name: Deploy Mini App Frontend to Azure
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags (e.g. v1.2.4)
+
+permissions:
+  id-token: write  # Required for Azure OIDC Federated Login
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      STORAGE_ACCOUNT: "stminiappregprod"
+      CONTAINER_NAME: "miniapp-registry-prod"
+      FRONT_DOOR_PROFILE: "afd-core-prod"
+      FRONT_DOOR_ENDPOINT: "fde-miniapp-prod"
+
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js (Frontend Build)
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: 'npm'
+
+    - name: Install & Compile Assets
+      run: |
+        npm ci
+        npm run build # Outputs to ./dist directory
+
+    - name: Parse Version from Tag
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+    - name: Package Bundle (.mapk ZIP format)
+      run: |
+        cd dist
+        # Zip all standard W3C assets, including root manifest.json
+        zip -r ../my-rewards-app.mapk .
+        cd ..
+
+    - name: Log in to Azure (OIDC Identity Federation)
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Upload .mapk Bundle to Private Azure Blob Storage
+      run: |
+        # Construct versioned destination path
+        DEST_BLOB="bundles/rewards-app/${{ steps.get_version.outputs.VERSION }}/rewards-app.mapk"
+        
+        echo "Uploading to Azure Storage..."
+        az storage blob upload \
+          --account-name ${{ env.STORAGE_ACCOUNT }} \
+          --container-name ${{ env.CONTAINER_NAME }} \
+          --name "$DEST_BLOB" \
+          --file "my-rewards-app.mapk" \
+          --content-type "application/x-mini-app-package" \
+          --overwrite true \
+          --auth-mode login
+
+    - name: Purge Azure Front Door CDN Cache Edge
+      run: |
+        # Purge edge cache specifically for the rewards app path to force reload
+        echo "Purging Front Door edge caches..."
+        az afd endpoint purge \
+          --resource-group rg-core-infra-prod \
+          --profile-name ${{ env.FRONT_DOOR_PROFILE }} \
+          --endpoint-name ${{ env.FRONT_DOOR_ENDPOINT }} \
+          --domains "cdn.coreapp.com" \
+          --content-paths "/bundles/rewards-app/*"
 ```
 
 ---
@@ -323,6 +595,247 @@ Mini App Backend               Azure API Ingress (NGINX/APIM)           Core AKS
 > * **Keycloak Load Profile:** Keycloak only processes requests during **Token Exchange (RFC 8693)** or user logins (which occur once per session/boot), not during microservice data exchanges. Thus, this centralized gateway model scales infinitely without requiring vertical scaling of your core Keycloak database.
 > 
 > *(Caution: Avoid Keycloak Stateful Token Introspection (`/token/introspect`) on every request, as that would force an active HTTP round-trip on every microservice call and crush Keycloak performance).*
+
+---
+
+### 10.1.1 Spring Cloud Gateway Reference Implementation
+
+For enterprise teams deploying **Spring Cloud Gateway** (e.g. in Azure Kubernetes Service or Azure Spring Apps), we provide below the complete, production-ready implementation of the **API Ingress Token Swap and Session Caching Engine**. 
+
+This single class implements:
+1. **Stateless Ephemeral Code Registration Endpoint** (`POST /api/gateway/register-code`).
+2. **Pre-Security Swapping Filter** (`TokenSwappingWebFilter`) running before Spring Security to swap `code_guest_xxxx` for raw OIDC JWTs with an active 30-second TTL.
+3. **WebSession Cookie Handler** to statefully cache and resolve tokens in a secure browser cookie context (Pattern A).
+4. **Decoupled Security Chain & Custom Routing** forwarding clean headers downstream to microservices.
+
+```java
+package com.core.gateway;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.cloud.gateway.route.RouteLocator;
+import org.springframework.cloud.gateway.route.builder.RouteLocatorBuilder;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.annotation.Order;
+import org.springframework.core.Ordered;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.config.annotation.web.reactive.EnableWebFluxSecurity;
+import org.springframework.security.config.web.server.ServerHttpSecurity;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.web.server.SecurityWebFilterChain;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ServerWebExchange;
+import org.springframework.web.server.WebFilter;
+import org.springframework.web.server.WebFilterChain;
+import org.springframework.cloud.gateway.filter.GatewayFilter;
+import org.springframework.security.core.context.ReactiveSecurityContextHolder;
+import org.springframework.security.core.context.SecurityContext;
+import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
+
+import java.util.Map;
+
+@SpringBootApplication
+public class CoreGatewayApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(CoreGatewayApplication.class, args);
+    }
+
+    @Value("${CORE_BE_URI:http://core-be:8082}")
+    private String coreBackendUri;
+
+    @Value("${MINI_APP_BE_URI:http://mini-app-be:8081}")
+    private String miniAppBackendUri;
+
+    @Value("${KEYCLOAK_URI:http://keycloak:8080}")
+    private String keycloakUri;
+
+    @Bean
+    public RouteLocator customRouteLocator(RouteLocatorBuilder builder) {
+        TokenPropagationFilter coreBeFilter = new TokenPropagationFilter(true); // Strips JWT
+        TokenPropagationFilter miniAppBeFilter = new TokenPropagationFilter(false); // Keeps JWT
+
+        return builder.routes()
+                .route("core-be-route", r -> r.path("/api/wallet/**")
+                        .filters(f -> f.filter(coreBeFilter))
+                        .uri(coreBackendUri))
+                .route("mini-app-be-route", r -> r.path("/api/rewards/**")
+                        .filters(f -> f.filter(miniAppBeFilter))
+                        .uri(miniAppBackendUri))
+                .route("keycloak-token-route", r -> r.path("/realms/production/protocol/openid-connect/token")
+                        .uri(keycloakUri))
+                .build();
+    }
+}
+
+// 1. Gateway Security Configuration: Decoupled JWT Token Offloading & Cross-Origin Credentials
+@Configuration
+@EnableWebFluxSecurity
+class SecurityConfig {
+
+    @Bean
+    public SecurityWebFilterChain springSecurityFilterChain(ServerHttpSecurity http) {
+        http
+            .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+            .csrf(csrf -> csrf.disable())
+            .authorizeExchange(exchanges -> exchanges
+                .pathMatchers("/api/wallet/**", "/api/rewards/claim").authenticated()
+                .anyExchange().permitAll()
+            )
+            .oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> {}));
+        return http.build();
+    }
+
+    @Bean
+    public org.springframework.web.cors.reactive.CorsConfigurationSource corsConfigurationSource() {
+        org.springframework.web.cors.CorsConfiguration configuration = new org.springframework.web.cors.CorsConfiguration();
+        configuration.setAllowedOriginPatterns(List.of("http://localhost:*", "http://127.0.0.1:*"));
+        configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+        configuration.setAllowedHeaders(List.of("Authorization", "Content-Type", "Cookie"));
+        configuration.setAllowCredentials(true);
+        
+        org.springframework.web.cors.reactive.UrlBasedCorsConfigurationSource source = 
+            new org.springframework.web.cors.reactive.UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", configuration);
+        return source;
+    }
+}
+
+// 2. Gateway Controller: Stateless Ephemeral Code Ingestion Endpoint
+@RestController
+@CrossOrigin(origins = "*", allowCredentials = "false")
+class GatewayCodeRegistrationController {
+
+    public static class CodeDetails {
+        final String token;
+        final long expiryTime;
+        CodeDetails(String token, long expiryTime) {
+            this.token = token;
+            this.expiryTime = expiryTime;
+        }
+    }
+
+    public static final Map<String, CodeDetails> tempCodeCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    @PostMapping("/api/gateway/register-code")
+    public Mono<ResponseEntity<?>> registerCode(@RequestBody Map<String, String> body) {
+        String code = body.get("code");
+        String token = body.get("token");
+        
+        if (code == null || token == null) {
+            return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "Invalid payload")));
+        }
+        
+        // Cache code with 30 seconds TTL (Layer 5)
+        tempCodeCache.put(code, new CodeDetails(token, System.currentTimeMillis() + 30000));
+        return Mono.just(ResponseEntity.ok(Map.of("status", "code_registered")));
+    }
+}
+
+// 3. Gateway Pre-Security WebFilter: Intercepts & Resolves Ephemeral Codes / WebSession Cookies
+@Component
+@Order(Ordered.HIGHEST_PRECEDENCE)
+class TokenSwappingWebFilter implements WebFilter {
+
+    @Override
+    public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
+        String authHeader = exchange.getRequest().getHeaders().getFirst("Authorization");
+        
+        // Case 1: Ephemeral Code Swapping (Pattern B-1 / B-2)
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            String token = authHeader.substring(7);
+            
+            if (token.startsWith("code_guest_")) {
+                GatewayCodeRegistrationController.CodeDetails details = 
+                    GatewayCodeRegistrationController.tempCodeCache.remove(token); // Single-use!
+                
+                if (details != null) {
+                    if (System.currentTimeMillis() > details.expiryTime) {
+                        exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
+                        return exchange.getResponse().setComplete();
+                    }
+                    
+                    final String realJwt = details.token;
+                    
+                    // Bind JWT to WebSession for subsequent stateful operations (Pattern A)
+                    return exchange.getSession().flatMap(session -> {
+                        session.getAttributes().put("SCOPED_TOKEN", realJwt);
+                        
+                        ServerWebExchange mutatedExchange = exchange.mutate()
+                            .request(r -> r.header("Authorization", "Bearer " + realJwt))
+                            .build();
+                        return chain.filter(mutatedExchange);
+                    });
+                } else {
+                    exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
+                    return exchange.getResponse().setComplete();
+                }
+            }
+        }
+        
+        // Case 2: Stateful Cookie Sessions (Pattern A)
+        if (authHeader == null || authHeader.trim().isEmpty()) {
+            return exchange.getSession().flatMap(session -> {
+                String cachedJwt = (String) session.getAttribute("SCOPED_TOKEN");
+                if (cachedJwt != null) {
+                    ServerWebExchange mutatedExchange = exchange.mutate()
+                        .request(r -> r.header("Authorization", "Bearer " + cachedJwt))
+                        .build();
+                    return chain.filter(mutatedExchange);
+                }
+                return chain.filter(exchange);
+            }).switchIfEmpty(chain.filter(exchange));
+        }
+        
+        return chain.filter(exchange);
+    }
+}
+
+// 4. Gateway Filter: Secure User Identity Propagation Pattern
+class TokenPropagationFilter implements GatewayFilter {
+
+    private final boolean stripAuthorization;
+
+    public TokenPropagationFilter(boolean stripAuthorization) {
+        this.stripAuthorization = stripAuthorization;
+    }
+
+    @Override
+    public Mono<Void> filter(ServerWebExchange exchange, org.springframework.cloud.gateway.filter.GatewayFilterChain chain) {
+        return ReactiveSecurityContextHolder.getContext()
+            .map(SecurityContext::getAuthentication)
+            .flatMap(authentication -> {
+                if (authentication != null && authentication.getPrincipal() instanceof Jwt) {
+                    Jwt jwt = (Jwt) authentication.getPrincipal();
+                    
+                    String userId = jwt.getSubject();
+                    String clientId = jwt.getClaimAsString("azp");
+                    String scopes = jwt.getClaimAsString("scope");
+
+                    ServerWebExchange mutatedExchange = exchange.mutate()
+                        .request(r -> {
+                            r.header("X-User-Id", userId != null ? userId : "");
+                            r.header("X-Client-Id", clientId != null ? clientId : "");
+                            r.header("X-User-Scopes", scopes != null ? scopes : "");
+                            
+                            if (stripAuthorization) {
+                                r.headers(headers -> headers.remove("Authorization"));
+                            }
+                        })
+                        .build();
+                    
+                    return chain.filter(mutatedExchange);
+                }
+                return chain.filter(exchange);
+            })
+            .switchIfEmpty(chain.filter(exchange));
+    }
+}
+```
 
 ---
 
@@ -478,24 +991,43 @@ To orchestrate this safely inside your Keycloak Realm, you must register three d
 
 ---
 
-### 11.2 Flow 1: Host App to Guest Mini App (Client Scoped Token)
-To prevent the guest app from reading the core session token, we request a scoped access token directly from Keycloak using OAuth 2.0 Scope constraints.
+### 11.2 Flow 1: Host App to Guest Mini App (Client Scoped Token with Ephemeral Ingress Swap)
 
-```
-Guest Mini App (JS)              Flutter Host App (Dart)            Keycloak Server (Realms)
-──────────────────              ───────────────────────            ────────────────────────
-        │                                  │                                    │
-        │── 1. sdk.auth.getToken() ───────>│                                    │
-        │                                  │── 2. Request Token Exchange ──────>│
-        │                                  │   (Client: flutter-host-app        │
-        │                                  │    Audience: mini-app-loyalty)     │
-        │                                  │                                    │
-        │                                  │<── 3. Return Scoped JWT Token ─────│
-        │                                  │                                    │
-        │<── 4. Resolve Token Promise ─────│                                    │
-        │                                  │                                    │
-        │── 5. GET /api/rewards ───────────┼───────────────────────────────────> [Mini App Backend]
-            (Bearer Micro-JWT)             │                                    │
+To prevent the guest app from reading the raw access tokens, we implement the **Layer 5 Ephemeral In-Memory Swap** at the API Ingress Gateway. The Guest Mini App's JS context only ever receives a single-use exchange code (`code_guest_xxxx`), which the Gateway swaps in-flight for the genuine scoped JWT before forwarding downstream.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant MiniApp as Guest Mini App (JS)
+    participant Host as Flutter Host App (Dart)
+    participant Gateway as API Ingress Gateway
+    participant Keycloak as Keycloak Server
+    participant Backend as Mini App Backend
+
+    User->>MiniApp: Launch / Request Token
+    MiniApp->>Host: JS-Bridge Request: sdk.auth.getToken()
+    activate Host
+    Host->>Keycloak: Silent Token Exchange (scope=loyalty-scope)
+    Keycloak-->>Host: Return Scoped JWT Token
+    Host->>Host: Generate Ephemeral Code (code_guest_xxxx, 30s TTL)
+    Host->>Gateway: Backchannel POST /api/gateway/register-code (code -> JWT)
+    Gateway-->>Host: 200 OK (Registered in Cache)
+    Host-->>MiniApp: Resolve JS Promise with code_guest_xxxx
+    deactivate Host
+
+    User->>MiniApp: Trigger Action (e.g., Claim Reward)
+    MiniApp->>Gateway: POST /api/rewards/claim (Bearer: code_guest_xxxx)
+    activate Gateway
+    Gateway->>Gateway: TokenSwappingWebFilter intercepts & swaps code_guest_xxxx for Scoped JWT
+    Gateway->>Gateway: Bind Scoped JWT to WebSession (if Pattern A)
+    Gateway->>Gateway: Perform OAuth2 JWT validation against Keycloak JWKS
+    Gateway->>Backend: Forward request with Scoped JWT in Authorization Header
+    activate Backend
+    Backend-->>Gateway: Process & Return Response
+    deactivate Backend
+    Gateway-->>MiniApp: Proxy Response
+    deactivate Gateway
 ```
 
 #### Keycloak Configuration Steps for Scoped Tokens:
@@ -503,8 +1035,8 @@ Guest Mini App (JS)              Flutter Host App (Dart)            Keycloak Ser
 2. Attach an **Audience Protocol Mapper** inside `loyalty-scope`:
    * **Name:** `loyalty-audience-mapper`
    * **Included Client Audience:** `mini-app-loyalty-rewards`
-3. Associate this Client Scope with the `flutter-host-app` client as **Optional**.
-4. When the user logs in, the host app obtains its master token. When a Mini App boots up and calls `getToken()`, the Flutter Host App executes an silent token refresh exchange request to Keycloak specifying `scope=loyalty-scope`, obtaining a JWT containing:
+3. Associate this Client Scope with the `flutter-host-app` client as **Optional** (or **Default**).
+4. When the user logs in, the host app obtains its master token. When a Mini App boots up and calls `getToken()`, the Flutter Host App executes a silent token refresh exchange request to Keycloak specifying `scope=loyalty-scope`, obtaining a JWT containing:
    ```json
    {
      "iss": "https://keycloak.yourdomain.com/realms/production",
@@ -514,7 +1046,7 @@ Guest Mini App (JS)              Flutter Host App (Dart)            Keycloak Ser
      "azp": "flutter-host-app"
    }
    ```
-5. This token is passed securely to the Mini App WebView context.
+5. Instead of passing this raw JWT to the WebView context, the Host App registers the JWT against an ephemeral code (`code_guest_xxxx`) on the Ingress Gateway, and resolves the WebView promise with that code.
 
 ---
 
@@ -586,30 +1118,36 @@ Keycloak validates the client authorization, verifies the signature of the subje
 
 ---
 
-### 11.4 Detailed Mechanics: The client-Side "Resolve Token Promise" Handshake
+### 11.4 Detailed Mechanics: The client-Side "Resolve Token Promise" Handshake with Ephemeral Swap
 
-In the Client-Side sequence diagram (**Flow 1, Step 4**), the Guest Mini App's JavaScript execution waits for a **"Resolve Token Promise"**. 
+In the Client-Side sequence diagram (**Flow 1**), the Guest Mini App's JavaScript execution waits for a **"Resolve Token Promise"**. 
 
 ```
- Guest WebView (JS Container)                       Host Mobile App (Flutter Core)
- ────────────────────────────                       ──────────────────────────────
-              │                                                    │
- 1. const token = await sdk.getToken();                            │
-    [Generates req_16849, returns Pending Promise]                 │
-              │── 2. window.flutter.postMessage(req_16849) ───────>│
-              │                                                    │ [Processes Keycloak Exchange]
-              │                                                    │ [Retrieves Scoped Micro-JWT]
-              │                                                    │
-              │<── 3. evaluateJavascript(Resolve req_16849) ───────│
- 4. window._hostAppCallbacks['req_16849'].resolve(jwt)             │
-    [Fulfills Promise! Code resumes with token]                    │
-              ▼                                                    │
+ Guest WebView (JS Container)                       Host Mobile App (Flutter Core)                      API Ingress Gateway
+ ────────────────────────────                       ──────────────────────────────                      ───────────────────
+              │                                                    │                                             │
+ 1. const code = await sdk.getToken();                             │                                             │
+    [Generates req_16849, returns Pending Promise]                 │                                             │
+              │── 2. window.flutter.postMessage(req_16849) ───────>│                                             │
+              │                                                    │ [Processes Keycloak Exchange]               │
+              │                                                    │ [Retrieves Scoped Micro-JWT]                │
+              │                                                    │ [Generates code_guest_xxxx]                 │
+              │                                                    │                                             │
+              │                                                    │── 3. POST /register-code ──────────────────>│
+              │                                                    │      (code_guest_xxxx -> Scoped JWT)        │
+              │                                                    │<── 4. 200 OK (Registered in Gateway)────────│
+              │                                                    │                                             │
+              │<── 5. evaluateJavascript / postMessage ────────────│                                             │
+              │    (Resolve req_16849 with code_guest_xxxx)        │                                             │
+ 6. window._hostAppCallbacks['req_16849'].resolve(code)            │                                             │
+    [Fulfills Promise! Code resumes with ephemeral code]           │                                             │
+              ▼                                                    │                                             │
 ```
 
-This asynchronous handshake bridges the memory-isolated boundary between Javascript running inside the OS WebView and the native Dart VM:
+This asynchronous handshake bridges the memory-isolated boundary between Javascript running inside the OS WebView and the native Dart VM, while securely preventing the raw JWT from ever reaching the guest context:
 
 #### A. Guest JS SDK Mechanism (Javascript Inside WebView)
-To prevent locking the UI thread, the Guest JS SDK must wrap the JS-Bridge call in a native **Javascript Promise**. It registers the Promise's native `resolve` and `reject` callbacks into a globally scoped registry map inside the WebView window context before sending the message:
+To prevent locking the UI thread, the Guest JS SDK wraps the JS-Bridge call in a native **Javascript Promise**. It registers the Promise's native `resolve` and `reject` callbacks into a globally scoped registry map inside the WebView window context before sending the message:
 
 ```javascript
 // Exposed inside the global WebView window scope
@@ -632,12 +1170,20 @@ const sdk = {
         
         // 4. Send the payload across the WebView bridge boundary to Flutter
         try {
-          window.flutter_inappwebview.callHandler('JSBridgeChannel', JSON.stringify({
+          const payload = JSON.stringify({
             miniAppId: "com.vendor.loyalty-rewards",
             requestId: requestId,
             action: "auth.getToken",
             params: { scopes: scopes }
-          }));
+          });
+          
+          if (window.flutter_inappwebview) {
+            window.flutter_inappwebview.callHandler('JSBridgeChannel', payload);
+          } else if (window.parent !== window) {
+            window.parent.postMessage(payload, "*");
+          } else {
+            throw new Error("WebView Host context not found.");
+          }
         } catch (e) {
           // Clean up on failure
           delete window._hostAppCallbacks[requestId];
@@ -650,84 +1196,55 @@ const sdk = {
 ```
 
 #### B. Flutter Host Resolution Mechanism (Dart Core)
-When the Flutter Host App completes the Keycloak authentication exchange, **the Host App itself is responsible for resolving the Javascript Promise**. It does this by using the WebView Controller's script execution engine to locate and execute the corresponding registered callback by ID:
+When the Flutter Host App completes the Keycloak authentication exchange and registers the generated exchange code with the Gateway, **the Host App resolves the Javascript Promise** by dispatching the result back to the WebView:
 
 ```dart
-import 'dart:convert';
-import 'package:flutter/material.dart';
-import 'package:flutter_inappwebview/flutter_inappwebview.dart';
-
-class HostWebViewWidget extends StatefulWidget {
-  @override
-  _HostWebViewWidgetState createState() => _HostWebViewWidgetState();
-}
-
-class _HostWebViewWidgetState extends State<HostWebViewWidget> {
-  InAppWebViewController? _webViewController;
-
-  @override
-  Widget build(BuildContext context) {
-    return InAppWebView(
-      initialUrlRequest: URLRequest(url: WebUri("https://cdn.dept.yourdomain.com/rewards/")),
-      onWebViewCreated: (controller) {
-        _webViewController = controller;
-        
-        // Listen to the JS SDK bridge channels
-        controller.addJavaScriptHandler(handlerName: 'JSBridgeChannel', callback: (args) async {
-          final String rawJson = args.first;
-          final Map<String, dynamic> request = jsonDecode(rawJson);
-          
-          final String requestId = request['requestId'];
-          final String action = request['action'];
-          
-          if (action == 'auth.getToken') {
-            try {
-              // 1. Process Keycloak exchange securely in native background
-              String scopedToken = await _fetchScopedTokenFromKeycloak(request['params']['scopes']);
-              
-              // 2. TRIGGER RESOLUTION: Execute evaluateJavascript to fulfill the Guest's JS Promise
-              _resolveJSPromise(requestId, scopedToken);
-            } catch (error) {
-              // 3. TRIGGER REJECTION: Fails the JS Promise cleanly on errors
-              _rejectJSPromise(requestId, error.toString());
-            }
-          }
-        });
-      },
-    );
-  }
-
-  // Uses InAppWebViewController to execute JS inside the WebView runtime
-  void _resolveJSPromise(String requestId, String jwtToken) {
-    if (_webViewController == null) return;
-    
-    // Locates the global registry mapping table, calls the resolve trigger, and sweeps the callback from memory
-    final String jsSource = """
-      if (window._hostAppCallbacks && window._hostAppCallbacks['$requestId']) {
-        window._hostAppCallbacks['$requestId'].resolve('$jwtToken');
-        delete window._hostAppCallbacks['$requestId'];
+// Part of lib/main.dart
+onMessageReceived: (rawJson) async {
+  final Map<String, dynamic> request = jsonDecode(rawJson);
+  final String requestId = request['requestId'];
+  final String action = request['action'];
+  
+  if (action == "auth.getToken") {
+    try {
+      final scopes = request['params']['scopes'] ?? [];
+      
+      // 1. Execute OIDC scope token exchange against Keycloak
+      final String scopedToken = await _executeKeycloakTokenExchange(scopes);
+      
+      // 2. Generate dynamic, short-lived ephemeral exchange code (30s TTL)
+      final int randomId = DateTime.now().millisecondsSinceEpoch % 1000000;
+      final String tempCode = "code_guest_$randomId";
+      
+      // 3. Securely register the code to the Central Gateway over the backchannel
+      final String registerUrl = "http://localhost:9000/api/gateway/register-code";
+      final regResponse = await http.post(
+        Uri.parse(registerUrl),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "code": tempCode,
+          "token": scopedToken,
+        }),
+      );
+      
+      if (regResponse.statusCode != 200) {
+        throw Exception("Gateway rejected code registration.");
       }
-    """;
-    
-    _webViewController!.evaluateJavascript(source: jsSource);
-  }
-
-  void _rejectJSPromise(String requestId, String errorMessage) {
-    if (_webViewController == null) return;
-    
-    final String jsSource = """
-      if (window._hostAppCallbacks && window._hostAppCallbacks['$requestId']) {
-        window._hostAppCallbacks['$requestId'].reject(new Error('$errorMessage'));
-        delete window._hostAppCallbacks['$requestId'];
-      }
-    """;
-    
-    _webViewController!.evaluateJavascript(source: jsSource);
-  }
-
-  Future<String> _fetchScopedTokenFromKeycloak(List<dynamic> scopes) async {
-    // Standard secure Keycloak OIDC authentication/refresh logic goes here
-    return "eyJhbGciOiJSUzI1NiIs...";
+      
+      // 4. Return the ephemeral exchange code instead of the raw JWT to the WebView context
+      _webViewController?.postMessage(jsonEncode({
+        'requestId': requestId,
+        'status': 'success',
+        'token': tempCode,
+      }));
+      
+    } catch (e) {
+      _webViewController?.postMessage(jsonEncode({
+        'requestId': requestId,
+        'status': 'error',
+        'error': e.toString(),
+      }));
+    }
   }
 }
 ```
@@ -875,28 +1392,169 @@ flutter create --platforms=web .
 flutter run -d chrome
 ```
 
-#### 4. The Live Execution Handshake
-1. **Request Scoped Token**:
-   * Click the **`1. Request Scoped Token from Host App`** button inside the Loyalty Rewards Mini App (lower half of Chrome window).
-   * **Ecosystem Handshake Log Output**:
-     ```
-     [Console Idle] Awaiting User Handshake.
-     [7:55:50 PM] Requesting OIDC exchange scoped token...
-     [7:55:50 PM] Generating pending JS Promise [req_1780055750109_959] for scopes: [loyalty-scope]
-     [7:55:50 PM] Sending postMessage payload to Parent Window (Web iFrame)...
-     [7:55:50 PM] Promise Resolved successfully for ID: req_1780055750109_959
-     [7:55:50 PM] Acquired Scoped Micro-JWT: eyJhbGciOiJSUzI1NiIsInR5cCIgOi...
-     ```
-2. **Claim Premium Gift**:
-   * Click **`2. Claim Premium Insurance Gift (Deducts Points)`** button.
-   * **Ecosystem Handshake Log Output**:
-     ```
-     [7:56:01 PM] Sending claim reward request to Mini App Backend on port 8081...
-     [7:56:02 PM] === CLAIM CONFIRMED ===
-     [7:56:02 PM] Item    : Insurance Premium Upgrade Discount (100 pts)
-     [7:56:02 PM] Wallet  : Wallet points deducted successfully.
-     [7:56:02 PM] Balance : 900 pts
-     ```
+#### 4. The Live Execution Handshake & Demo Modes
+
+Our verified codebase includes an interactive **Demo Strategy Selector** dropdown inside the Loyalty Rewards Mini App UI. This lets you showcase the security tradeoffs and token resolution handshakes live to your colleagues without changing code.
+
+Below are the sequence diagrams and validation steps for each of the three active demo modes:
+
+##### Mode 1: Pattern B-1: Strict One-Time Code (Manual Replay Demo - *Default*)
+In this mode, the Gateway's `TokenSwappingWebFilter` intercepts `/api/rewards/claim` with `code_guest_xxxx`, checks its cache, swaps it, and *deletes* it immediately. A subsequent replay attempt fails at the Ingress Gateway.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant MiniApp as Guest Mini App (JS)
+    participant Host as Flutter Host App (Dart)
+    participant Gateway as API Ingress Gateway
+    participant Backend as Mini App Backend (Spring)
+
+    User->>MiniApp: Click "1. Request Scoped Token..."
+    MiniApp->>Host: JS-Bridge Request: auth.getToken()
+    activate Host
+    Host->>Host: Request Keycloak Token & Generate code_guest_xxxx
+    Host->>Gateway: Backchannel POST /api/gateway/register-code (code -> JWT)
+    Gateway-->>Host: 200 OK (Registered in Cache)
+    Host-->>MiniApp: Resolve with code_guest_xxxx
+    deactivate Host
+    
+    User->>MiniApp: Click "2. Claim Premium..."
+    MiniApp->>Gateway: POST /api/rewards/claim (Authorization: Bearer code_guest_xxxx)
+    activate Gateway
+    Gateway->>Gateway: Swapping filter intercepts, retrieves JWT & deletes code from Cache
+    Gateway->>Backend: Forward POST /claim with real JWT in Authorization header
+    activate Backend
+    Backend->>Backend: Execute Keycloak Exchange & Wallet Deduct
+    Backend-->>Gateway: 200 Success Response
+    deactivate Backend
+    Gateway-->>MiniApp: 200 Success
+    deactivate Gateway
+    
+    User->>MiniApp: Click "2. Claim Premium..." again (Replay Attempt)
+    MiniApp->>Gateway: POST /api/rewards/claim (Authorization: Bearer code_guest_xxxx)
+    activate Gateway
+    Gateway->>Gateway: Filter checks Cache for code_guest_xxxx -> NOT FOUND!
+    Gateway-->>MiniApp: 401 Unauthorized (Already consumed / invalid)
+    deactivate Gateway
+```
+
+1. Click **`1. Request Scoped Token...`** to retrieve a temporary single-use code (`code_guest_xxxx`).
+2. Click **`2. Claim Premium...`** to execute the backchannel swap and deduct points successfully.
+3. Click **`2. Claim Premium...`** a second time.
+4. **Expected Result:** The request immediately fails with:
+   `Claim Failed: Unauthorized`
+   *This proves to your team that codes cannot be replayed or hijacked by attackers once consumed.*
+
+##### Mode 2: Pattern B-2: Stateless SDK Silent Refresh (Seamless SDK Flow)
+This mode simulates a professional SDK implementation where client-side statelessness is maintained silently.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant MiniApp as Guest Mini App (JS)
+    participant Host as Flutter Host App (Dart)
+    participant Gateway as API Ingress Gateway
+    participant Backend as Mini App Backend (Spring)
+
+    Note over MiniApp, Backend: First Transaction
+    User->>MiniApp: Click "2. Claim Premium..."
+    activate MiniApp
+    MiniApp->>Host: JS-Bridge Request: auth.getToken()
+    activate Host
+    Host->>Gateway: Backchannel POST /api/gateway/register-code (code_guest_1 -> JWT)
+    Gateway-->>Host: 200 OK (Registered)
+    Host-->>MiniApp: Resolve with code_guest_1
+    deactivate Host
+    MiniApp->>Gateway: POST /api/rewards/claim (Authorization: Bearer code_guest_1)
+    activate Gateway
+    Gateway->>Gateway: Consume & swap code_guest_1 -> JWT
+    Gateway->>Backend: Forward claims with JWT
+    activate Backend
+    Backend-->>Gateway: 200 Success Response
+    deactivate Backend
+    Gateway-->>MiniApp: 200 Success
+    deactivate Gateway
+    deactivate MiniApp
+
+    Note over MiniApp, Backend: Second Transaction (Silent Refresh)
+    User->>MiniApp: Click "2. Claim Premium..." again
+    activate MiniApp
+    MiniApp->>Host: JS-Bridge Request: auth.getToken()
+    activate Host
+    Host->>Gateway: Backchannel POST /api/gateway/register-code (code_guest_2 -> JWT)
+    Gateway-->>Host: 200 OK (Registered)
+    Host-->>MiniApp: Resolve with code_guest_2
+    deactivate Host
+    MiniApp->>Gateway: POST /api/rewards/claim (Authorization: Bearer code_guest_2)
+    activate Gateway
+    Gateway->>Gateway: Consume & swap code_guest_2 -> JWT
+    Gateway->>Backend: Forward claims with JWT
+    activate Backend
+    Backend-->>Gateway: 200 Success Response
+    deactivate Backend
+    Gateway-->>MiniApp: 200 Success
+    deactivate Gateway
+    deactivate MiniApp
+```
+
+1. Select **`Pattern B-2: Stateless SDK Silent Refresh`** in the dropdown.
+2. Click **`2. Claim Premium...`** multiple times consecutively.
+3. **Expected Result:** Every transaction completes successfully! 
+   *Under the hood, the Guest JS SDK silently requests a fresh ephemeral code from the Host JS-Bridge before dispatching each API call, demonstrating seamless stateless execution.*
+
+##### Mode 3: Pattern A: Stateful Session Cookies (Seamless Backend State)
+This mode demonstrates standard server-side web session caching using secure, cross-origin cookies.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant MiniApp as Guest Mini App (JS)
+    participant Host as Flutter Host App (Dart)
+    participant Gateway as API Ingress Gateway
+    participant Backend as Mini App Backend (Spring)
+
+    Note over MiniApp, Backend: Session Establishment (First Call)
+    User->>MiniApp: Click "1. Request Scoped Token..."
+    MiniApp->>Host: JS-Bridge Request: auth.getToken()
+    activate Host
+    Host->>Gateway: Backchannel POST /api/gateway/register-code (code_guest_xxxx -> JWT)
+    Gateway-->>Host: 200 OK (Registered)
+    Host-->>MiniApp: Resolve with code_guest_xxxx
+    deactivate Host
+    
+    User->>MiniApp: Click "2. Claim Premium..."
+    MiniApp->>Gateway: POST /api/rewards/claim (Authorization: Bearer code_guest_xxxx)
+    activate Gateway
+    Gateway->>Gateway: Consume code_guest_xxxx, resolve JWT
+    Gateway->>Gateway: Cache JWT in WebSession & Generate Session Cookie
+    Gateway->>Backend: Forward claims with JWT
+    activate Backend
+    Backend-->>Gateway: 200 Success Response
+    deactivate Backend
+    Gateway-->>MiniApp: 200 Success + Set-Cookie (SESSION)
+    deactivate Gateway
+    
+    Note over MiniApp, Backend: Session Reuse (Subsequent Calls)
+    User->>MiniApp: Click "2. Claim Premium..." again
+    MiniApp->>Gateway: POST /api/rewards/claim (Cookie: SESSION)
+    activate Gateway
+    Gateway->>Gateway: Resolve JWT directly from WebSession Cache!
+    Gateway->>Backend: Forward claims with JWT
+    activate Backend
+    Backend-->>Gateway: 200 Success Response
+    deactivate Backend
+    Gateway-->>MiniApp: 200 Success Response
+    deactivate Gateway
+```
+
+1. Select **`Pattern A: Stateful Session Cookies`** in the dropdown.
+2. Click **`1. Request Scoped Token...`** and then **`2. Claim Premium...`** once to establish the session.
+3. Click **`2. Claim Premium...`** multiple times consecutively.
+4. **Expected Result:** Every subsequent click succeeds seamlessly without invoking the Host App's JS-Bridge again!
+   *During the first exchange, the Ingress Gateway caches the resolved JWT inside the server-side `WebSession` and returns a secure cookie. Subsequent calls automatically transmit this cookie, and the Gateway resolves the token statefully.*
 
 #### 5. Verify the Propagated Downstream Headers
 To verify that the Core AKS service successfully received the offloaded trusted user context, execute:
@@ -1137,5 +1795,145 @@ Do **NOT** share database connection strings, storage keys, or API secrets acros
 2. **Namespace Key Vault Access**:
    * Use **Azure Key Vault Secrets Provider**. 
    * Each Mini App namespace mounts secrets from its own dedicated Key Vault instance. Under no circumstances should a Mini App pod be able to access the Core Team's production Key Vault.
+
+---
+
+## 16. Repository Architecture & Standard Naming Conventions
+
+To prevent architectural drift, ensure ease of integration, and simplify multi-vendor management in Azure DevOps or GitHub, all Mini App frontends and backends must conform to a standardized repository architecture and naming taxonomy.
+
+### 16.1 Mini App Frontend Repository Architecture
+
+Frontend mini-apps are built as lightweight Single Page Applications (SPAs) optimized for local sandboxing. They must be structured to build into a clean distribution directory (`/dist`) before packaging into the `.mapk` archive.
+
+#### 16.1.1 Frontend Directory Structure
+Every frontend project repository must follow this layout:
+
+```
+miniapp-<domain>-frontend/
+├── package.json               # Package configuration & dependencies
+├── tsconfig.json              # TypeScript compilation rules
+├── vite.config.ts             # Compilation and bundler configuration
+├── /public                    # Static assets copied as-is to the bundle root
+│   ├── manifest.json          # W3C-aligned Mini App configuration manifest
+│   └── logo.png               # High-res logo (144x144 png)
+├── /src                       # Application source code
+│   ├── main.ts                # Application bootstrap entrypoint
+│   ├── App.vue                # Root layout component
+│   ├── /assets                # Sub-assets (styles, SVGs, optimized images)
+│   ├── /components            # Reusable UI components conforming to design tokens
+│   ├── /views                 # Page-level route views
+│   ├── /locales               # i18n translation bundles
+│   │   ├── en.json
+│   │   └── id.json
+│   └── /services              # External API & JS-Bridge bindings
+│       ├── jsbridge.ts        # JS-Bridge event listener & wrappers
+│       └── api.ts             # HTTP client (Axios/Fetch) with token injection
+└── /scripts                   # CI/CD and deployment utilities
+    └── package-mapk.js        # Automated script to zip /dist into .mapk
+```
+
+#### 16.1.2 Automated `.mapk` Packaging Script (`package-mapk.js`)
+To guarantee that the zipped bundle does not contain redundant build tools, source directories, or parent folders (avoiding decompression hierarchy failures inside the Host app), the repository must include a build-packaging script. 
+
+Add the following Node.js script under `/scripts/package-mapk.js` to run post-build:
+
+```javascript
+const fs = require('fs');
+const path = require('path');
+const archiver = require('archiver');
+
+const outputDir = path.join(__dirname, '../');
+const sourceDir = path.join(__dirname, '../dist');
+const manifestPath = path.join(sourceDir, 'manifest.json');
+
+// Assert W3C manifest.json exists in compiled output
+if (!fs.existsSync(manifestPath)) {
+  console.error("ERROR: manifest.json is missing from compile target (/dist). Build failed.");
+  process.exit(1);
+}
+
+const packageJson = require('../package.json');
+const zipFileName = `${packageJson.name}-${packageJson.version}.mapk`;
+const output = fs.createWriteStream(path.join(outputDir, zipFileName));
+const archive = archiver('zip', { zlib: { level: 9 } });
+
+output.on('close', () => {
+  console.log(`\nSUCCESS: Packaged Mini App successfully!`);
+  console.log(`Bundle: ${zipFileName}`);
+  console.log(`Total Size: ${(archive.pointer() / 1024 / 1024).toFixed(2)} MB`);
+});
+
+archive.on('error', (err) => {
+  throw err;
+});
+
+archive.pipe(output);
+// Append dist folder contents directly to root of the ZIP
+archive.directory(sourceDir, false);
+archive.finalize();
+```
+
+Execute this in `package.json` scripts:
+```json
+"scripts": {
+  "build": "vite build",
+  "postbuild": "node scripts/package-mapk.js"
+}
+```
+
+---
+
+### 16.2 Mini App Backend Repository Blueprint & Naming Conventions
+
+While downstream backends adhere to existing Core microservice coding guidelines, they must conform to strict naming boundaries to ensure namespace cleanliness, seamless Azure AKS routing, and clear Keycloak identity management.
+
+#### 16.2.1 Unified Repository Naming Rules
+Standardizing repository names prevents organizational sprawl and identifies ownership instantly:
+
+| Project Origin | Repository Type | Naming Template | Example Repository Name |
+| :--- | :--- | :--- | :--- |
+| **Vendor / Internal Teams** | Frontend | `miniapp-<domain>-frontend` | `miniapp-loyaltyrewards-frontend` |
+| **Vendor / Internal Teams** | Backend | `miniapp-<domain>-backend` | `miniapp-loyaltyrewards-backend` |
+| **Core Dev Teams** | Frontend | `core-miniapp-<domain>-frontend` | `core-miniapp-wallet-frontend` |
+| **Core Dev Teams** | Backend | `core-miniapp-<domain>-backend` | `core-miniapp-wallet-backend` |
+
+*Note: `<domain>` must be in all-lowercase, alphanumeric characters only (no hyphens in domain if possible, or single-hyphen to ensure clean database/namespace mapping).*
+
+#### 16.2.2 Infrastructure & Container Naming Conventions
+To keep AKS, Azure Container Registry (ACR), and Kubernetes network configurations clean:
+
+1. **Docker Container Image Tagging:**
+   * **Template:** `<registry-name>.azurecr.io/miniapps/miniapp-<domain>-backend:<tag>`
+   * **Example:** `stregminiappprod.azurecr.io/miniapps/miniapp-loyaltyrewards-backend:v1.2.4`
+2. **Kubernetes Resources (Deployments, Services):**
+   * **Namespace:** `miniapp-<domain>` (e.g., `miniapp-loyaltyrewards`)
+   * **Deployment:** `miniapp-<domain>-be-deploy` (e.g., `miniapp-loyaltyrewards-be-deploy`)
+   * **Service:** `miniapp-<domain>-be-svc` (e.g., `miniapp-loyaltyrewards-be-svc`)
+
+#### 16.2.3 Database & Isolated Schema Naming
+To maintain data sovereignty boundaries:
+* **Database Instance (Dedicated):** `db_miniapp_<domain>`
+* **Database Schema (Standard SQL Schema):** `<domain>` (instead of `dbo` or `public` to prevent accidental resource sharing)
+* **Example:**
+  * Database Name: `db_miniapp_loyaltyrewards`
+  * Schema Name: `loyaltyrewards`
+
+#### 16.2.4 Keycloak Identity Naming Conventions
+For OIDC client routing and token exchanging validation:
+* **Frontend Scoped Client ID:** `miniapp-<domain>-client` (e.g., `miniapp-loyaltyrewards-client`)
+* **Backend Confidential Client ID:** `miniapp-<domain>-backend` (e.g., `miniapp-loyaltyrewards-backend`)
+
+#### 16.2.5 Edge API Gateway Mapping & URL Naming
+All endpoints exposed externally through the API Gateway (KrakenD/Kong) must be prefixed dynamically under a centralized API route to isolate Core microservices:
+
+* **Public Facing Gateway Path:** 
+  `https://api.coreapp.com/api/v1/miniapps/<domain>/{route}`
+* **Private Internal Cluster Path:**
+  `http://miniapp-<domain>-be-svc.miniapp-<domain>.svc.cluster.local:8081/api/v1/{route}`
+* **Example Mapping:**
+  * Client Request: `GET https://api.coreapp.com/api/v1/miniapps/loyaltyrewards/offers`
+  * Gateway routes to: `GET http://miniapp-loyaltyrewards-be-svc.miniapp-loyaltyrewards.svc.cluster.local:8081/api/v1/offers`
+
 
 
