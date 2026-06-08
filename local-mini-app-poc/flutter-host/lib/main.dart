@@ -89,30 +89,47 @@ class _HostShellScreenState extends State<HostShellScreen> {
     }
   }
 
-  // 2. Perform standard OAuth 2.0 Scope Down using Refresh Token on behalf of Guest Mini App
-  Future<String> _executeKeycloakScopeDown(List<dynamic> scopes) async {
+  // 2. Perform standard OIDC Scope Down or Client Token-Exchange on behalf of Guest Mini App
+  Future<String> _executeKeycloakScopeDown(List<dynamic> scopes, String miniAppId) async {
     if (!_isLoggedIn) {
       throw Exception("User is not authenticated in Host App.");
     }
 
-    _logTelemetry("Bridge request: Initiating standard OIDC scope refresh scope down for ${scopes.join(", ")}...");
+    final bool useTokenExchange = miniAppId == "com.vendor.loyalty-rewards";
+
+    if (useTokenExchange) {
+      _logTelemetry("Bridge request: Initiating OIDC Client Token-Exchange for $miniAppId (scopes: ${scopes.join(", ")})...");
+    } else {
+      _logTelemetry("Bridge request: Initiating standard OIDC scope refresh scope-down for $miniAppId (scopes: ${scopes.join(", ")})...");
+    }
+
+    final Map<String, String> body = useTokenExchange
+        ? {
+            "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+            "client_id": "flutter-host-app",
+            "subject_token": _masterAccessToken,
+            "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+            "scope": scopes.join(" "),
+          }
+        : {
+            "grant_type": "refresh_token",
+            "client_id": "flutter-host-app",
+            "refresh_token": _masterRefreshToken,
+            "scope": scopes.join(" "),
+          };
 
     final response = await http.post(
       Uri.parse("$keycloakBaseUrl/token"),
       headers: {"Content-Type": "application/x-www-form-urlencoded"},
-      body: {
-        "grant_type": "refresh_token",
-        "client_id": "flutter-host-app",
-        "refresh_token": _masterRefreshToken,
-        "scope": scopes.join(" "),
-      },
+      body: body,
     );
 
     if (response.statusCode == 200) {
       final Map<String, dynamic> data = jsonDecode(response.body);
       return data['access_token']; // Returns Scoped Micro-JWT
     } else {
-      throw Exception("Scope down rejected: Status ${response.statusCode} - ${response.body}");
+      final String flowName = useTokenExchange ? "Token exchange" : "Scope down";
+      throw Exception("$flowName rejected: Status ${response.statusCode} - ${response.body}");
     }
   }
 
@@ -236,9 +253,10 @@ class _HostShellScreenState extends State<HostShellScreen> {
                   if (action == "auth.getToken") {
                     try {
                       final scopes = request['params']['scopes'] ?? [];
+                      final String miniAppId = request['miniAppId'] ?? "";
                       
-                      // 1. Execute standard OIDC scope down via Refresh Token against Keycloak
-                      final String scopedToken = await _executeKeycloakScopeDown(scopes);
+                      // 1. Execute standard OIDC scope down or token exchange against Keycloak
+                      final String scopedToken = await _executeKeycloakScopeDown(scopes, miniAppId);
                       
                       // 2. Generate dynamic, short-lived ephemeral exchange code (Layer 5)
                       final int randomId = DateTime.now().millisecondsSinceEpoch % 1000000;
