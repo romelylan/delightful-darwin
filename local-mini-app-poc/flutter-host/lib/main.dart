@@ -254,15 +254,15 @@ class _HostShellScreenState extends State<HostShellScreen> {
                     try {
                       final scopes = request['params']['scopes'] ?? [];
                       final String miniAppId = request['miniAppId'] ?? "";
-                      
+
                       // 1. Execute standard OIDC scope down or token exchange against Keycloak
                       final String scopedToken = await _executeKeycloakScopeDown(scopes, miniAppId);
-                      
+
                       // 2. Generate dynamic, short-lived ephemeral exchange code (Layer 5)
                       final int randomId = DateTime.now().millisecondsSinceEpoch % 1000000;
                       final String tempCode = "code_guest_$randomId";
                       _logTelemetry("Token acquired. Registering secure temp code: $tempCode");
-                      
+
                       // 3. Securely register the code to the Mini App Backend over the backchannel
                       try {
                         final String registerUrl = "http://localhost:9000/api/gateway/register-code";
@@ -274,7 +274,7 @@ class _HostShellScreenState extends State<HostShellScreen> {
                             "token": scopedToken,
                           }),
                         );
-                        
+
                         if (regResponse.statusCode == 200) {
                           _logTelemetry("Code registered to Backend. Dispatching code to Webview...");
                         } else {
@@ -284,7 +284,7 @@ class _HostShellScreenState extends State<HostShellScreen> {
                         _logTelemetry("Backchannel registration error: ${err.toString()}");
                         throw Exception("Failed to secure temp code on backend.");
                       }
-                      
+
                       // 4. Return the ephemeral code instead of the raw JWT to the WebView context
                       _webViewController?.postMessage(jsonEncode({
                         'requestId': requestId,
