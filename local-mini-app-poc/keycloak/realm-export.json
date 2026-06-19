@@ -54,7 +54,28 @@
           "protocolMapper": "oidc-audience-mapper",
           "consentRequired": false,
           "config": {
-            "included.client.audience": "mini-app-insurance-rewards",
+            "included.client.audience": "core-wallet-service",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "wallet-scope",
+      "protocol": "openid-connect",
+      "attributes": {
+        "display.on.consent.screen": "true",
+        "consent.screen.text": "Access core wallet service"
+      },
+      "protocolMappers": [
+        {
+          "name": "wallet-audience-mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "core-wallet-service",
             "id.token.claim": "false",
             "access.token.claim": "true"
           }
@@ -91,7 +112,11 @@
       "serviceAccountsEnabled": true,
       "authorizationServicesEnabled": true,
       "directAccessGrantsEnabled": true,
-      "protocol": "openid-connect"
+      "protocol": "openid-connect",
+      "optionalClientScopes": [],
+      "defaultClientScopes": [
+        "wallet-scope"
+      ]
     },
     {
       "clientId": "core-wallet-service",
@@ -99,11 +124,10 @@
       "secret": "wallet-secret",
       "publicClient": false,
       "serviceAccountsEnabled": true,
+      "authorizationServicesEnabled": true,
       "protocol": "openid-connect",
       "optionalClientScopes": [],
-      "defaultClientScopes": [
-        "loyalty-scope"
-      ]
+      "defaultClientScopes": []
     }
   ]
 }

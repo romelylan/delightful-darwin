@@ -201,18 +201,6 @@
       <div class="subtitle">Model 2 Sandbox Mini-App (Vite / SPA Mock)</div>
     </header>
 
-    <!-- Demo Strategy Selector Dropdown -->
-    <div class="card" style="margin-bottom: 15px; border: 1px solid rgba(56, 189, 248, 0.25); padding: 15px;">
-      <div style="font-size: 11px; font-weight: 700; margin-bottom: 8px; color: var(--primary); text-transform: uppercase; letter-spacing: 0.05em;">
-        Demo Strategy Selector (Dynamic Handshake)
-      </div>
-      <select id="demoModeSelector" style="width: 100%; padding: 10px; border-radius: 8px; background: #0f172a; border: 1px solid rgba(255,255,255,0.15); color: #f1f5f9; font-size: 12px; font-weight: 500; cursor: pointer; outline: none;" onchange="changeDemoMode()">
-        <option value="strict-one-time">Pattern B-1: Strict One-Time Code (Manual Replay Demo)</option>
-        <option value="silent-refresh">Pattern B-2: Stateless SDK Silent Refresh (Seamless SDK Flow)</option>
-        <option value="stateful-session">Pattern A: Stateful Session Cookies (Seamless Backend State)</option>
-      </select>
-    </div>
-
     <div class="card">
       <button class="btn" id="btnRequestToken" onclick="fetchTokenFromHost()">
         1. Request Scoped Token from Host App
@@ -232,103 +220,14 @@
     </div>
   </div>
 
+  <script src="jsbridge-sdk.js"></script>
   <script>
     // -------------------------------------------------------------
-    // CLIENT-SIDE JS SDK: PROMISE RESOLUTION PATTERN
+    // PAGE-SPECIFIC: Loyalty Rewards Mini App
     // -------------------------------------------------------------
-    window._hostAppCallbacks = {};
+    const hostAppSdk = createHostAppSdk({ miniAppId: "com.vendor.loyalty-rewards" });
     let activeToken = null;
-
-    const hostAppSdk = {
-      auth: {
-        getToken: function(scopes) {
-          return new Promise((resolve, reject) => {
-            const requestId = "req_" + Date.now() + "_" + Math.floor(Math.random() * 1000);
-            
-            // Register resolve/reject callbacks dynamically in window context
-            window._hostAppCallbacks[requestId] = {
-              resolve: (token) => {
-                logConsole(`Promise Resolved successfully for ID: ${requestId}`, "success");
-                resolve(token);
-              },
-              reject: (err) => {
-                logConsole(`Promise Rejected for ID: ${requestId} - Error: ${err}`, "error");
-                reject(err);
-              }
-            };
-
-            logConsole(`Generating pending JS Promise [${requestId}] for scopes: [${scopes.join(', ')}]`, "system");
-
-            // Dispatch message across secure WebView channel or parent window postMessage
-            try {
-              const payload = JSON.stringify({
-                miniAppId: "com.vendor.loyalty-rewards",
-                requestId: requestId,
-                action: "auth.getToken",
-                params: { scopes: scopes }
-              });
-
-              if (window.flutter_inappwebview) {
-                logConsole(`Sending postMessage payload to Flutter Host App (Mobile)...`, "system");
-                window.flutter_inappwebview.callHandler('JSBridgeChannel', payload);
-              } else if (window.parent !== window) {
-                logConsole(`Sending postMessage payload to Parent Window (Web iFrame)...`, "system");
-                window.parent.postMessage(payload, "*");
-              } else {
-                throw new Error("Webview Host context not found. Are you running this inside the Flutter Host App?");
-              }
-            } catch (e) {
-              delete window._hostAppCallbacks[requestId];
-              reject(e.message);
-            }
-          });
-        }
-      }
-    };
-
-    // Setup message listener to receive response from parent window (for Web/iframe mode)
-    window.addEventListener('message', (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data && data.requestId && window._hostAppCallbacks[data.requestId]) {
-          if (data.status === "success") {
-            window._hostAppCallbacks[data.requestId].resolve(data.token);
-          } else {
-            window._hostAppCallbacks[data.requestId].reject(data.error);
-          }
-        }
-      } catch (e) {
-        // Ignore parsing errors for other messages
-      }
-    });
-
-    function logConsole(message, type = "normal") {
-      const consoleEl = document.getElementById("consoleOutput");
-      const line = document.createElement("div");
-      line.className = "console-line";
-      
-      if (type === "success") line.classList.add("success-text");
-      if (type === "error") line.classList.add("error-text");
-      if (type === "system") line.classList.add("system-text");
-
-      const time = new Date().toLocaleTimeString();
-      line.innerText = `[${time}] ${message}`;
-      consoleEl.appendChild(line);
-      consoleEl.scrollTop = consoleEl.scrollHeight;
-    }
-
-    // -------------------------------------------------------------
-    // BUTTON ACTIONS
-    // -------------------------------------------------------------
-    let currentMode = "strict-one-time";
     let sessionEstablished = false;
-
-    function changeDemoMode() {
-      currentMode = document.getElementById("demoModeSelector").value;
-      activeToken = null;
-      sessionEstablished = false;
-      logConsole(`Changed demo strategy to: '${currentMode.toUpperCase()}' (Cache cleared)`, "system");
-    }
 
     async function fetchTokenFromHost() {
       try {
@@ -352,18 +251,12 @@
     }
 
     async function claimLoyaltyReward() {
-      // B-2: Stateless SDK Silent Refresh Strategy
-      if (currentMode === "silent-refresh") {
-        logConsole("[SDK FLOW] Executing SILENT REFRESH: Fetching fresh temp code dynamically before transaction...", "system");
-        await fetchTokenFromHost();
-      }
-
       if (!activeToken && !sessionEstablished) {
         logConsole("Authentication required. Please request token first.", "error");
         return;
       }
 
-      logConsole(`Sending claim request to Backend (Strategy: ${currentMode.toUpperCase()})...`, "normal");
+      logConsole("Sending claim request to Backend (Strategy: STATEFUL_SESSION)...", "normal");
       
       try {
         const headers = {
@@ -377,8 +270,7 @@
         const response = await fetch("http://localhost:9000/api/rewards/claim", {
           method: "POST",
           headers: headers,
-          // Pattern A: Stateful Cookie Session requires passing credentials cross-origin
-          credentials: currentMode === "stateful-session" ? "include" : "omit",
+          credentials: "include",
           body: JSON.stringify({
             rewardName: "Insurance Premium Upgrade Discount (100 pts)"
           })
@@ -391,12 +283,10 @@
           logConsole(`Item    : ${data.rewardItem}`, "success");
           logConsole(`Wallet  : ${data.coreWalletResult.message}`, "success");
           logConsole(`Balance : ${data.coreWalletResult.remainingBalance} pts`, "success");
-          
-          if (currentMode === "stateful-session") {
-            sessionEstablished = true;
-            activeToken = null; // Clear token from JS memory!
-            logConsole("[STATEFUL SESSION] Token cleared from JS memory. Subsequent claims rely purely on browser cookies!", "system");
-          }
+
+          sessionEstablished = true;
+          activeToken = null;
+          logConsole("[STATEFUL SESSION] Token cleared from JS memory. Subsequent claims rely purely on browser cookies!", "system");
         } else {
           logConsole(`Claim Failed: ${data.error} - ${data.details}`, "error");
         }

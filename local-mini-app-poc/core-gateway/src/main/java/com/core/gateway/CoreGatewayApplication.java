@@ -29,8 +29,8 @@ import org.springframework.web.server.session.CookieWebSessionIdResolver;
 import org.springframework.web.cors.reactive.CorsWebFilter;
 import org.springframework.http.server.reactive.ServerHttpResponse;
 
-import java.util.Map;
 import java.util.List;
+import java.util.Map;
 
 @SpringBootApplication
 public class CoreGatewayApplication {
@@ -147,25 +147,24 @@ class GatewayCodeRegistrationController {
     public static class CodeDetails {
         final String token;
         final long expiryTime;
+
         CodeDetails(String token, long expiryTime) {
             this.token = token;
             this.expiryTime = expiryTime;
         }
     }
 
-    // Ephemeral code cache: mapped code -> token details with 30s TTL
     public static final Map<String, CodeDetails> tempCodeCache = new java.util.concurrent.ConcurrentHashMap<>();
 
     @PostMapping("/api/gateway/register-code")
     public Mono<ResponseEntity<?>> registerCode(@RequestBody Map<String, String> body) {
         String code = body.get("code");
         String token = body.get("token");
-        
+
         if (code == null || token == null) {
             return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "Invalid payload")));
         }
-        
-        // Cache code with 30 seconds TTL (Layer 5)
+
         tempCodeCache.put(code, new CodeDetails(token, System.currentTimeMillis() + 30000));
         System.out.println("====== API GATEWAY: REGISTERED EPHEMERAL TEMP CODE: " + code + " ======");
         return Mono.just(ResponseEntity.ok(Map.of("status", "code_registered")));
@@ -180,43 +179,40 @@ class TokenSwappingWebFilter implements WebFilter {
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
         String authHeader = exchange.getRequest().getHeaders().getFirst("Authorization");
-        
-        // Case 1: Ephemeral Code Swapping (Pattern B-1 / B-2)
+
         if (authHeader != null && authHeader.startsWith("Bearer ")) {
             String token = authHeader.substring(7);
-            
+
             if (token.startsWith("code_guest_")) {
-                GatewayCodeRegistrationController.CodeDetails details = GatewayCodeRegistrationController.tempCodeCache.remove(token); // Single-use!
-                
+                GatewayCodeRegistrationController.CodeDetails details = GatewayCodeRegistrationController.tempCodeCache.remove(token);
+
                 if (details != null) {
                     if (System.currentTimeMillis() > details.expiryTime) {
                         System.out.println("====== API GATEWAY ERROR: Ephemeral code has expired! ======");
                         exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
                         return exchange.getResponse().setComplete();
                     }
-                    
+
                     System.out.println("====== API GATEWAY: SWAPPED EPHEMERAL CODE " + token + " FOR REAL JWT! ======");
                     final String realJwt = details.token;
-                    
-                    // Bind JWT to WebSession for subsequent stateful operations (Pattern A)
+
                     return exchange.getSession().flatMap(session -> {
                         session.getAttributes().put("SCOPED_TOKEN", realJwt);
-                        
+
                         ServerWebExchange mutatedExchange = exchange.mutate()
                             .request(r -> r.header("Authorization", "Bearer " + realJwt))
                             .build();
                         return chain.filter(mutatedExchange);
                     });
-                } else {
-                    System.out.println("====== API GATEWAY ERROR: Ephemeral code already consumed or invalid: " + token + " ======");
-                    exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
-                    return exchange.getResponse().setComplete();
                 }
+
+                System.out.println("====== API GATEWAY ERROR: Ephemeral code already consumed or invalid: " + token + " ======");
+                exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
+                return exchange.getResponse().setComplete();
             }
         }
-        
-        // Case 2: Stateful Cookie Sessions (Pattern A)
-        // If Authorization header is missing, resolve the user's token directly from the Gateway's server-side WebSession
+
+        // If Authorization header is missing, resolve the user's token directly from the Gateway's server-side WebSession.
         if (authHeader == null || authHeader.trim().isEmpty()) {
             if (exchange.getRequest().getCookies().containsKey("SESSION")) {
                 return exchange.getSession().flatMap(session -> {
@@ -259,6 +255,12 @@ class TokenPropagationFilter implements GatewayFilter {
                     String userId = jwt.getSubject(); // sub
                     String clientId = jwt.getClaimAsString("azp"); // Authorized party (Client ID)
                     String scopes = jwt.getClaimAsString("scope");
+                    // RFC 8693: for token-exchange tokens the "aud" claim is the authorization
+                    // signal (the token is minted FOR a specific resource). The "scope" claim is
+                    // empty on legacy-exchange tokens because exchange can only narrow the subject's
+                    // scopes, so we forward the audience for resource servers to authorize on.
+                    List<String> audiences = jwt.getAudience();
+                    String audience = (audiences != null) ? String.join(" ", audiences) : "";
 
                     // Mutate downstream request, propagating verified trusted headers
                     ServerWebExchange mutatedExchange = exchange.mutate()
@@ -266,6 +268,7 @@ class TokenPropagationFilter implements GatewayFilter {
                             r.header("X-User-Id", userId != null ? userId : "");
                             r.header("X-Client-Id", clientId != null ? clientId : "");
                             r.header("X-User-Scopes", scopes != null ? scopes : "");
+                            r.header("X-Token-Audience", audience);
                             
                             if (stripAuthorization) {
                                 // Strip JWT for core systems to prevent duplication

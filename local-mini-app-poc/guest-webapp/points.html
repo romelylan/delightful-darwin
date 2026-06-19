@@ -229,88 +229,14 @@
     </div>
   </div>
 
+  <script src="jsbridge-sdk.js"></script>
   <script>
     // -------------------------------------------------------------
-    // CLIENT-SIDE JS SDK: PROMISE RESOLUTION PATTERN
+    // PAGE-SPECIFIC: Insurance Points Mini App
     // -------------------------------------------------------------
-    window._hostAppCallbacks = {};
+    const hostAppSdk = createHostAppSdk({ miniAppId: "com.vendor.insurance-points" });
     let activeToken = null;
     let sessionEstablished = false;
-
-    const hostAppSdk = {
-      auth: {
-        getToken: function(scopes) {
-          return new Promise((resolve, reject) => {
-            const requestId = "req_" + Date.now() + "_" + Math.floor(Math.random() * 1000);
-            
-            window._hostAppCallbacks[requestId] = {
-              resolve: (token) => {
-                logConsole(`Promise Resolved successfully for ID: ${requestId}`, "success");
-                resolve(token);
-              },
-              reject: (err) => {
-                logConsole(`Promise Rejected for ID: ${requestId} - Error: ${err}`, "error");
-                reject(err);
-              }
-            };
-
-            logConsole(`Generating pending JS Promise [${requestId}] for scopes: [${scopes.join(', ')}]`, "system");
-
-            try {
-              const payload = JSON.stringify({
-                miniAppId: "com.vendor.insurance-points",
-                requestId: requestId,
-                action: "auth.getToken",
-                params: { scopes: scopes }
-              });
-
-              if (window.flutter_inappwebview) {
-                logConsole(`Sending postMessage payload to Flutter Host App (Mobile)...`, "system");
-                window.flutter_inappwebview.callHandler('JSBridgeChannel', payload);
-              } else if (window.parent !== window) {
-                logConsole(`Sending postMessage payload to Parent Window (Web iFrame)...`, "system");
-                window.parent.postMessage(payload, "*");
-              } else {
-                throw new Error("Webview Host context not found.");
-              }
-            } catch (e) {
-              delete window._hostAppCallbacks[requestId];
-              reject(e.message);
-            }
-          });
-        }
-      }
-    };
-
-    window.addEventListener('message', (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data && data.requestId && window._hostAppCallbacks[data.requestId]) {
-          if (data.status === "success") {
-            window._hostAppCallbacks[data.requestId].resolve(data.token);
-          } else {
-            window._hostAppCallbacks[data.requestId].reject(data.error);
-          }
-        }
-      } catch (e) {
-        // Ignore unrelated messages
-      }
-    });
-
-    function logConsole(message, type = "normal") {
-      const consoleEl = document.getElementById("consoleOutput");
-      const line = document.createElement("div");
-      line.className = "console-line";
-      
-      if (type === "success") line.classList.add("success-text");
-      if (type === "error") line.classList.add("error-text");
-      if (type === "system") line.classList.add("system-text");
-
-      const time = new Date().toLocaleTimeString();
-      line.innerText = `[${time}] ${message}`;
-      consoleEl.appendChild(line);
-      consoleEl.scrollTop = consoleEl.scrollHeight;
-    }
 
     async function fetchTokenFromHost() {
       try {

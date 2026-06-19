@@ -24,12 +24,14 @@ public class WalletController {
             @RequestHeader(value = "X-User-Id", required = false) String userId,
             @RequestHeader(value = "X-Client-Id", required = false) String clientId,
             @RequestHeader(value = "X-User-Scopes", required = false) String scopes,
+            @RequestHeader(value = "X-Token-Audience", required = false) String audience,
             @RequestBody Map<String, Object> payload) {
 
         System.out.println("====== CORE AKS BACKEND RECEIVED CALL ======");
         System.out.println("X-User-Id    (User UUID)     : " + userId);
         System.out.println("X-Client-Id  (Calling Client): " + clientId);
         System.out.println("X-User-Scopes(Active Scopes) : " + scopes);
+        System.out.println("X-Token-Audience (Intended)  : " + audience);
         System.out.println("==========================================");
 
         // 1. Guard check: Enforce that request came through Gateway (offloaded safety)
@@ -38,10 +40,15 @@ public class WalletController {
                     .body("Forbidden: Direct pod access without gateway header verification is blocked.");
         }
 
-        // 2. Scope verification (Zero crypt overhead)
-        if (scopes == null || !scopes.contains("loyalty-scope")) {
+        // 2. Authorization (zero crypt overhead). Accept EITHER:
+        //    - an explicit "wallet-scope" (direct/refresh-token flows), OR
+        //    - an "aud" of core-wallet-service (RFC 8693 token-exchange flows, where legacy
+        //      Keycloak exchange yields an empty scope claim but a resource-restricted audience).
+        boolean hasWalletScope = scopes != null && scopes.contains("wallet-scope");
+        boolean isAudiencedForWallet = audience != null && audience.contains("core-wallet-service");
+        if (!hasWalletScope && !isAudiencedForWallet) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN)
-                    .body("Forbidden: Missing loyalty-scope required to transact.");
+                    .body("Forbidden: Missing wallet-scope required to transact.");
         }
 
         // 3. Process business logic (Simulated Wallet Deduction)

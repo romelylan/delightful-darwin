@@ -68,7 +68,12 @@ public class RewardsController {
             body.add("subject_token", microToken);
             body.add("subject_token_type", "urn:ietf:params:oauth:token-type:access_token");
             body.add("audience", "core-wallet-service"); // Audience maps to core-be auth requirements
-            body.add("scope", "loyalty-scope"); // Request delegation of the loyalty scope
+            // NOTE: Do NOT pass an explicit "scope" parameter here.
+            // Keycloak treats the token-exchange "scope" param as a DOWN-scope filter against the
+            // subject token. The subject (guest) micro-token only carries "loyalty-scope", so asking
+            // for "wallet-scope" would be filtered out, leaving an empty scope claim.
+            // Omitting it lets Keycloak issue the token with this confidential client's DEFAULT client
+            // scopes (wallet-scope), which is the correct server-side privilege-elevation path.
 
             HttpEntity<MultiValueMap<String, String>> exchangeRequest = new HttpEntity<>(body, exchangeHeaders);
 

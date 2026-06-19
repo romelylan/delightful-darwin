@@ -15,6 +15,37 @@ This is a complete, fully executable local Proof-of-Concept demonstrating the **
 
 ---
 
+## 1a. Two Authorization Models
+
+This POC demonstrates **two distinct delegation models**, each authorizing on the signal that is actually reliable for that flow.
+
+| | **Model 1 — Scope Preserved** | **Model 2 — Token Exchange** |
+|---|---|---|
+| Example mini app | Insurance Points (`points.html`) | Loyalty Rewards (`index.html`) |
+| Keycloak grant | `refresh_token` scope-down (same client) | `urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693) |
+| Who elevates | Flutter host re-issues a narrowed user token | `mini-app-be` exchanges the guest micro-token for a wallet-targeted token |
+| `scope` claim in final token | **Preserved** (e.g. `insurance-scope`) | **Empty** — exchange can only *narrow* the subject's scopes, and the guest token never held `wallet-scope` |
+| `aud` claim in final token | client default | `core-wallet-service` (set by the `wallet-scope` audience mapper) |
+| Authorization signal at `core-be` | `X-User-Scopes` contains the scope | `X-Token-Audience` contains `core-wallet-service` |
+
+### Why Model 2 authorizes on audience, not scope
+
+Keycloak **legacy token-exchange** (`24.0.2` here) issues a token whose `scope` is the **intersection** of the subject token's scopes and the requesting client's scopes. The guest micro-token only carries `loyalty-scope`, so requesting `wallet-scope` yields an **empty** `scope` claim — no realm toggle can add a scope the subject never had.
+
+The correct authorization signal for this hop is the **`aud` (audience)** claim: the exchanged token is minted **specifically for** `core-wallet-service`, and only `mini-app-loyalty-rewards` is permitted to perform that exchange. The gateway forwards this as the `X-Token-Audience` header, and `core-be` accepts the call when **either** `wallet-scope` is present **or** the audience targets `core-wallet-service`. This preserves the guest/backend privilege boundary — the guest webview never receives a wallet-capable token.
+
+```mermaid
+flowchart LR
+    subgraph M1["Model 1 — refresh_token (scopes preserved)"]
+      A1[guest token: insurance-scope] -->|refresh_token, same client| B1[token keeps insurance-scope] --> C1["core /credit checks scope ✓"]
+    end
+    subgraph M2["Model 2 — token-exchange (scope narrows to empty)"]
+      A2[guest token: loyalty-scope] -->|exchange by mini-app-be| B2["token: scope='' , aud=core-wallet-service"] --> C2["core /deduct checks audience ✓"]
+    end
+```
+
+---
+
 ## 2. Booting the Core Cloud Infrastructure (Docker Compose)
 
 Navigate into the POC folder and launch all containerized cloud components:
@@ -77,15 +108,28 @@ To verify that the microservices received the identity headers without performin
 docker logs -f poc-core-be
 ```
 
-You will see the clean HTTP header propagation printed natively:
+You will see the clean HTTP header propagation printed natively.
+
+**Model 2 (Loyalty Rewards — token exchange):** note the empty `X-User-Scopes` and the populated `X-Token-Audience`, which is what authorizes the call:
 
 ```text
 ====== CORE AKS BACKEND RECEIVED CALL ======
 X-User-Id    (User UUID)     : c6b8b0e8-07e1-4cbb-9273-95629c426639
 X-Client-Id  (Calling Client): mini-app-loyalty-rewards
-X-User-Scopes(Active Scopes) : loyalty-scope
+X-User-Scopes(Active Scopes) :
+X-Token-Audience (Intended)  : core-wallet-service
 ==========================================
 Deducting 100 points for User c6b8b0e8-07e1-4cbb-9273-95629c426639 via mini-app-loyalty-rewards
+```
+
+**Model 1 (Insurance Points — refresh-token scope-down):** here the scope is preserved and authorizes the call:
+
+```text
+====== CORE AKS BACKEND RECEIVED CREDIT CALL ======
+X-User-Id    (User UUID)     : c6b8b0e8-07e1-4cbb-9273-95629c426639
+X-Client-Id  (Calling Client): flutter-host-app
+X-User-Scopes(Active Scopes) : loyalty-scope insurance-scope
+==========================================
 ```
 
 ---
