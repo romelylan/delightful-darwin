@@ -89,8 +89,8 @@ class _HostShellScreenState extends State<HostShellScreen> {
     }
   }
 
-  // 2. Perform standard OIDC Scope Down or Client Token-Exchange on behalf of Guest Mini App
-  Future<String> _executeKeycloakScopeDown(List<dynamic> scopes, String miniAppId) async {
+  // 2. Issue a short-lived scoped JWT for the Mini App, then let Spring Gateway bind it to a BFF session.
+  Future<String> _issueGatewayBootstrapToken(List<dynamic> scopes, String miniAppId) async {
     if (!_isLoggedIn) {
       throw Exception("User is not authenticated in Host App.");
     }
@@ -98,9 +98,15 @@ class _HostShellScreenState extends State<HostShellScreen> {
     final bool useTokenExchange = miniAppId == "com.vendor.loyalty-rewards";
 
     if (useTokenExchange) {
-      _logTelemetry("Bridge request: Initiating OIDC Client Token-Exchange for $miniAppId (scopes: ${scopes.join(", ")})...");
+      _logTelemetry(
+        "Bridge request: Issuing scoped token-exchange bootstrap token for $miniAppId "
+        "(scopes: ${scopes.join(", ")})...",
+      );
     } else {
-      _logTelemetry("Bridge request: Initiating standard OIDC scope refresh scope-down for $miniAppId (scopes: ${scopes.join(", ")})...");
+      _logTelemetry(
+        "Bridge request: Issuing scoped refresh-grant bootstrap token for $miniAppId "
+        "(scopes: ${scopes.join(", ")})...",
+      );
     }
 
     final Map<String, String> body = useTokenExchange
@@ -126,10 +132,9 @@ class _HostShellScreenState extends State<HostShellScreen> {
 
     if (response.statusCode == 200) {
       final Map<String, dynamic> data = jsonDecode(response.body);
-      return data['access_token']; // Returns Scoped Micro-JWT
+      return data['access_token'];
     } else {
-      final String flowName = useTokenExchange ? "Token exchange" : "Scope down";
-      throw Exception("$flowName rejected: Status ${response.statusCode} - ${response.body}");
+      throw Exception("Gateway bootstrap token rejected: Status ${response.statusCode} - ${response.body}");
     }
   }
 
@@ -255,41 +260,13 @@ class _HostShellScreenState extends State<HostShellScreen> {
                       final scopes = request['params']['scopes'] ?? [];
                       final String miniAppId = request['miniAppId'] ?? "";
 
-                      // 1. Execute standard OIDC scope down or token exchange against Keycloak
-                      final String scopedToken = await _executeKeycloakScopeDown(scopes, miniAppId);
+                      final String scopedToken = await _issueGatewayBootstrapToken(scopes, miniAppId);
+                      _logTelemetry("Gateway bootstrap token acquired. Dispatching to WebView for one-time BFF session bootstrap...");
 
-                      // 2. Generate dynamic, short-lived ephemeral exchange code (Layer 5)
-                      final int randomId = DateTime.now().millisecondsSinceEpoch % 1000000;
-                      final String tempCode = "code_guest_$randomId";
-                      _logTelemetry("Token acquired. Registering secure temp code: $tempCode");
-
-                      // 3. Securely register the code to the Mini App Backend over the backchannel
-                      try {
-                        final String registerUrl = "http://localhost:9000/api/gateway/register-code";
-                        final regResponse = await http.post(
-                          Uri.parse(registerUrl),
-                          headers: {"Content-Type": "application/json"},
-                          body: jsonEncode({
-                            "code": tempCode,
-                            "token": scopedToken,
-                          }),
-                        );
-
-                        if (regResponse.statusCode == 200) {
-                          _logTelemetry("Code registered to Backend. Dispatching code to Webview...");
-                        } else {
-                          throw Exception("Backend rejected registration: Status ${regResponse.statusCode}");
-                        }
-                      } catch (err) {
-                        _logTelemetry("Backchannel registration error: ${err.toString()}");
-                        throw Exception("Failed to secure temp code on backend.");
-                      }
-
-                      // 4. Return the ephemeral code instead of the raw JWT to the WebView context
                       _webViewController?.postMessage(jsonEncode({
                         'requestId': requestId,
                         'status': 'success',
-                        'token': tempCode,
+                        'token': scopedToken,
                       }));
                       
                     } catch (e) {

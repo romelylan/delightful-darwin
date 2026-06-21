@@ -83,6 +83,7 @@
       font-size: 24px;
       font-weight: 700;
       background: linear-gradient(135deg, var(--primary), var(--secondary));
+      background-clip: text;
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       margin-bottom: 6px;
@@ -225,19 +226,18 @@
     // -------------------------------------------------------------
     // PAGE-SPECIFIC: Loyalty Rewards Mini App
     // -------------------------------------------------------------
+    const gatewayBaseUrl = "http://localhost:9000";
     const hostAppSdk = createHostAppSdk({ miniAppId: "com.vendor.loyalty-rewards" });
-    let activeToken = null;
     let sessionEstablished = false;
 
     async function fetchTokenFromHost() {
       try {
-        logConsole("Requesting OIDC exchange scoped token...", "normal");
+        logConsole("Requesting Spring Gateway BFF session bootstrap from Host App...", "normal");
         
         sessionEstablished = false;
-        // Triggers the JS-Bridge evaluateJavascript promise handshake
-        activeToken = await hostAppSdk.auth.getToken(["loyalty-scope"]);
-        
-        logConsole(`Acquired Scoped Micro-JWT: ${activeToken.substring(0, 30)}...`, "success");
+        await hostAppSdk.auth.bootstrapSession(["loyalty-scope"], gatewayBaseUrl);
+        logConsole("Scoped session established at Spring Gateway. WebView will now use only the BFF cookie.", "success");
+        sessionEstablished = true;
         
         // Update UI status
         const badge = document.getElementById("authStatusBadge");
@@ -251,25 +251,19 @@
     }
 
     async function claimLoyaltyReward() {
-      if (!activeToken && !sessionEstablished) {
+      if (!sessionEstablished) {
         logConsole("Authentication required. Please request token first.", "error");
         return;
       }
 
-      logConsole("Sending claim request to Backend (Strategy: STATEFUL_SESSION)...", "normal");
+      logConsole("Sending claim request to Backend (Strategy: SPRING GATEWAY BFF SESSION)...", "normal");
       
       try {
-        const headers = {
-          "Content-Type": "application/json"
-        };
-        if (activeToken) {
-          headers["Authorization"] = `Bearer ${activeToken}`;
-        }
-
-        // Triggers the Backend two-step validation flow
-        const response = await fetch("http://localhost:9000/api/rewards/claim", {
+        const response = await fetch(`${gatewayBaseUrl}/api/rewards/claim`, {
           method: "POST",
-          headers: headers,
+          headers: {
+            "Content-Type": "application/json"
+          },
           credentials: "include",
           body: JSON.stringify({
             rewardName: "Insurance Premium Upgrade Discount (100 pts)"
@@ -283,10 +277,7 @@
           logConsole(`Item    : ${data.rewardItem}`, "success");
           logConsole(`Wallet  : ${data.coreWalletResult.message}`, "success");
           logConsole(`Balance : ${data.coreWalletResult.remainingBalance} pts`, "success");
-
-          sessionEstablished = true;
-          activeToken = null;
-          logConsole("[STATEFUL SESSION] Token cleared from JS memory. Subsequent claims rely purely on browser cookies!", "system");
+          logConsole("[STATEFUL SESSION] Spring Gateway BFF session reused successfully.", "system");
         } else {
           logConsole(`Claim Failed: ${data.error} - ${data.details}`, "error");
         }

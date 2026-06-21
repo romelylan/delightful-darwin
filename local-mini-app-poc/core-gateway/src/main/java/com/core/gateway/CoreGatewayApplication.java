@@ -14,6 +14,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.config.annotation.web.reactive.EnableWebFluxSecurity;
 import org.springframework.security.config.web.server.ServerHttpSecurity;
 import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.security.web.server.SecurityWebFilterChain;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ServerWebExchange;
@@ -31,6 +32,7 @@ import org.springframework.http.server.reactive.ServerHttpResponse;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 @SpringBootApplication
 public class CoreGatewayApplication {
@@ -99,8 +101,8 @@ class SecurityConfig {
                 }))
             )
             .authorizeExchange(exchanges -> exchanges
-                // Restrict wallet and rewards claim endpoints to authenticated Keycloak tokens
-                .pathMatchers("/api/wallet/**", "/api/rewards/claim").authenticated()
+                // Restrict bootstrap and business endpoints to authenticated Keycloak tokens
+                .pathMatchers("/api/gateway/bootstrap-session", "/api/wallet/**", "/api/rewards/claim").authenticated()
                 .anyExchange().permitAll()
             )
             .oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> {}));
@@ -139,39 +141,44 @@ class SecurityConfig {
     }
 }
 
-// 2. Gateway Controller: Stateless Ephemeral Code Ingestion Endpoint
+// 2. Gateway Controller: Mini App BFF session bootstrap endpoint
 @RestController
-@CrossOrigin(origins = "*", allowCredentials = "false")
-class GatewayCodeRegistrationController {
+@CrossOrigin(allowCredentials = "true", originPatterns = {"http://localhost:*", "http://127.0.0.1:*"})
+class GatewayMiniAppBffController {
 
-    public static class CodeDetails {
-        final String token;
-        final long expiryTime;
-
-        CodeDetails(String token, long expiryTime) {
-            this.token = token;
-            this.expiryTime = expiryTime;
-        }
-    }
-
-    public static final Map<String, CodeDetails> tempCodeCache = new java.util.concurrent.ConcurrentHashMap<>();
-
-    @PostMapping("/api/gateway/register-code")
-    public Mono<ResponseEntity<?>> registerCode(@RequestBody Map<String, String> body) {
-        String code = body.get("code");
-        String token = body.get("token");
-
-        if (code == null || token == null) {
-            return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "Invalid payload")));
+    @PostMapping("/api/gateway/bootstrap-session")
+    public Mono<ResponseEntity<?>> bootstrapSession(
+            @RequestHeader(value = "Authorization", required = false) String authorizationHeader,
+            JwtAuthenticationToken authentication,
+            ServerWebExchange exchange) {
+        if (authorizationHeader == null || !authorizationHeader.startsWith("Bearer ")) {
+            return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "Missing Bearer token")));
         }
 
-        tempCodeCache.put(code, new CodeDetails(token, System.currentTimeMillis() + 30000));
-        System.out.println("====== API GATEWAY: REGISTERED EPHEMERAL TEMP CODE: " + code + " ======");
-        return Mono.just(ResponseEntity.ok(Map.of("status", "code_registered")));
+        String scopedJwt = authorizationHeader.substring(7).trim();
+        if (scopedJwt.isEmpty()) {
+            return Mono.just(ResponseEntity.badRequest().body(Map.of("error", "Empty Bearer token")));
+        }
+
+        return exchange.getSession().map(session -> {
+            session.getAttributes().put("SCOPED_TOKEN", scopedJwt);
+
+            String userId = authentication.getToken().getSubject();
+            String clientId = authentication.getToken().getClaimAsString("azp");
+
+            System.out.println("====== API GATEWAY BFF: SESSION BOOTSTRAPPED FOR USER " + userId
+                    + " VIA CLIENT " + Objects.toString(clientId, "unknown") + " ======");
+
+            return ResponseEntity.ok(Map.of(
+                    "status", "session_bootstrapped",
+                    "userId", Objects.toString(userId, ""),
+                    "clientId", Objects.toString(clientId, "")
+            ));
+        });
     }
 }
 
-// 3. Gateway Pre-Security WebFilter: Intercepts & Resolves Ephemeral Codes / WebSession Cookies
+// 3. Gateway Pre-Security WebFilter: Resolves the Gateway-owned WebSession cookie
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
 class TokenSwappingWebFilter implements WebFilter {
@@ -179,38 +186,6 @@ class TokenSwappingWebFilter implements WebFilter {
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
         String authHeader = exchange.getRequest().getHeaders().getFirst("Authorization");
-
-        if (authHeader != null && authHeader.startsWith("Bearer ")) {
-            String token = authHeader.substring(7);
-
-            if (token.startsWith("code_guest_")) {
-                GatewayCodeRegistrationController.CodeDetails details = GatewayCodeRegistrationController.tempCodeCache.remove(token);
-
-                if (details != null) {
-                    if (System.currentTimeMillis() > details.expiryTime) {
-                        System.out.println("====== API GATEWAY ERROR: Ephemeral code has expired! ======");
-                        exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
-                        return exchange.getResponse().setComplete();
-                    }
-
-                    System.out.println("====== API GATEWAY: SWAPPED EPHEMERAL CODE " + token + " FOR REAL JWT! ======");
-                    final String realJwt = details.token;
-
-                    return exchange.getSession().flatMap(session -> {
-                        session.getAttributes().put("SCOPED_TOKEN", realJwt);
-
-                        ServerWebExchange mutatedExchange = exchange.mutate()
-                            .request(r -> r.header("Authorization", "Bearer " + realJwt))
-                            .build();
-                        return chain.filter(mutatedExchange);
-                    });
-                }
-
-                System.out.println("====== API GATEWAY ERROR: Ephemeral code already consumed or invalid: " + token + " ======");
-                exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
-                return exchange.getResponse().setComplete();
-            }
-        }
 
         // If Authorization header is missing, resolve the user's token directly from the Gateway's server-side WebSession.
         if (authHeader == null || authHeader.trim().isEmpty()) {

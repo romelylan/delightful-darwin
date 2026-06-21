@@ -38,6 +38,47 @@
       throw new Error("createHostAppSdk requires config.miniAppId");
     }
 
+    function requestScopedBootstrapToken(scopes) {
+      return new Promise(function (resolve, reject) {
+        var requestId = "req_" + Date.now() + "_" + Math.floor(Math.random() * 1000);
+
+        global._hostAppCallbacks[requestId] = {
+          resolve: function (token) {
+            logConsole("Promise Resolved successfully for ID: " + requestId, "success");
+            resolve(token);
+          },
+          reject: function (err) {
+            logConsole("Promise Rejected for ID: " + requestId + " - Error: " + err, "error");
+            reject(err);
+          }
+        };
+
+        logConsole("Generating pending JS Promise [" + requestId + "] for scopes: [" + scopes.join(', ') + "]", "system");
+
+        try {
+          var payload = JSON.stringify({
+            miniAppId: config.miniAppId,
+            requestId: requestId,
+            action: "auth.getToken",
+            params: { scopes: scopes }
+          });
+
+          if (global.flutter_inappwebview) {
+            logConsole("Sending postMessage payload to Flutter Host App (Mobile)...", "system");
+            global.flutter_inappwebview.callHandler('JSBridgeChannel', payload);
+          } else if (global.parent !== global) {
+            logConsole("Sending postMessage payload to Parent Window (Web iFrame)...", "system");
+            global.parent.postMessage(payload, "*");
+          } else {
+            throw new Error("Webview Host context not found. Are you running this inside the Flutter Host App?");
+          }
+        } catch (e) {
+          delete global._hostAppCallbacks[requestId];
+          reject(e.message);
+        }
+      });
+    }
+
     return {
       auth: {
         /**
@@ -45,45 +86,35 @@
          * Returns a Promise that resolves with the token (or ephemeral code).
          */
         getToken: function (scopes) {
-          return new Promise(function (resolve, reject) {
-            var requestId = "req_" + Date.now() + "_" + Math.floor(Math.random() * 1000);
+          return requestScopedBootstrapToken(scopes);
+        },
 
-            // Register resolve/reject callbacks dynamically in window context
-            global._hostAppCallbacks[requestId] = {
-              resolve: function (token) {
-                logConsole("Promise Resolved successfully for ID: " + requestId, "success");
-                resolve(token);
+        bootstrapSession: function (scopes, gatewayBaseUrl) {
+          var baseUrl = gatewayBaseUrl || global.__MINI_APP_GATEWAY_URL__ || "http://localhost:9000";
+
+          return requestScopedBootstrapToken(scopes).then(function (token) {
+            logConsole("One-time Spring Gateway bootstrap token acquired. Establishing BFF session...", "system");
+
+            return fetch(baseUrl + "/api/gateway/bootstrap-session", {
+              method: "POST",
+              headers: {
+                "Authorization": "Bearer " + token,
+                "Content-Type": "application/json"
               },
-              reject: function (err) {
-                logConsole("Promise Rejected for ID: " + requestId + " - Error: " + err, "error");
-                reject(err);
-              }
-            };
+              credentials: "include",
+              body: JSON.stringify({ bootstrap: true })
+            }).then(function (response) {
+              return response.json().catch(function () {
+                return {};
+              }).then(function (data) {
+                if (!response.ok) {
+                  throw new Error(data.error || ("Gateway bootstrap failed with status " + response.status));
+                }
 
-            logConsole("Generating pending JS Promise [" + requestId + "] for scopes: [" + scopes.join(', ') + "]", "system");
-
-            // Dispatch message across secure WebView channel or parent window postMessage
-            try {
-              var payload = JSON.stringify({
-                miniAppId: config.miniAppId,
-                requestId: requestId,
-                action: "auth.getToken",
-                params: { scopes: scopes }
+                logConsole("Spring Gateway BFF session established successfully.", "success");
+                return data;
               });
-
-              if (global.flutter_inappwebview) {
-                logConsole("Sending postMessage payload to Flutter Host App (Mobile)...", "system");
-                global.flutter_inappwebview.callHandler('JSBridgeChannel', payload);
-              } else if (global.parent !== global) {
-                logConsole("Sending postMessage payload to Parent Window (Web iFrame)...", "system");
-                global.parent.postMessage(payload, "*");
-              } else {
-                throw new Error("Webview Host context not found. Are you running this inside the Flutter Host App?");
-              }
-            } catch (e) {
-              delete global._hostAppCallbacks[requestId];
-              reject(e.message);
-            }
+            });
           });
         }
       }

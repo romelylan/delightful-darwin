@@ -83,6 +83,7 @@
       font-size: 24px;
       font-weight: 700;
       background: linear-gradient(135deg, var(--primary), var(--secondary));
+      background-clip: text;
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       margin-bottom: 6px;
@@ -234,16 +235,17 @@
     // -------------------------------------------------------------
     // PAGE-SPECIFIC: Insurance Points Mini App
     // -------------------------------------------------------------
+    const gatewayBaseUrl = "http://localhost:9000";
     const hostAppSdk = createHostAppSdk({ miniAppId: "com.vendor.insurance-points" });
-    let activeToken = null;
     let sessionEstablished = false;
 
     async function fetchTokenFromHost() {
       try {
-        logConsole("Requesting OIDC refresh-grant scope down...", "normal");
+        logConsole("Requesting Spring Gateway BFF session bootstrap from Host App...", "normal");
         sessionEstablished = false;
-        activeToken = await hostAppSdk.auth.getToken(["insurance-scope"]);
-        logConsole(`Acquired Scoped Micro-JWT Exchange Code: ${activeToken}`, "success");
+        await hostAppSdk.auth.bootstrapSession(["insurance-scope"], gatewayBaseUrl);
+        logConsole("Scoped session established at Spring Gateway. WebView will now use only the BFF cookie.", "success");
+        sessionEstablished = true;
         
         const badge = document.getElementById("authStatusBadge");
         badge.innerText = "AUTHENTICATED";
@@ -256,27 +258,21 @@
     }
 
     async function creditWalletPoints() {
-      if (!activeToken && !sessionEstablished) {
+      if (!sessionEstablished) {
         logConsole("Authentication required. Please request token first.", "error");
         return;
       }
 
-      logConsole("Sending credit request to Core Gateway (Strategy: PATTERN A - STATEFUL SESSION)...", "normal");
+      logConsole("Sending credit request to Core Gateway (Strategy: SPRING GATEWAY BFF SESSION)...", "normal");
       
       try {
-        const headers = {
-          "Content-Type": "application/json"
-        };
-        if (activeToken) {
-          headers["Authorization"] = `Bearer ${activeToken}`;
-        }
-
-        // Call Core credit API directly via API Ingress Gateway (port 9000)
-        // No Token Exchange needed on the backend because it's a Model 1 core system call
-        const response = await fetch("http://localhost:9000/api/wallet/credit", {
+        // Call Core credit API directly via the Spring Gateway BFF session.
+        const response = await fetch(`${gatewayBaseUrl}/api/wallet/credit`, {
           method: "POST",
-          headers: headers,
-          credentials: "include", // Transmit and secure cookie session cross-origin
+          headers: {
+            "Content-Type": "application/json"
+          },
+          credentials: "include",
           body: JSON.stringify({
             amount: 200
           })
@@ -291,11 +287,7 @@
           logConsole(`Credited: +${data.creditedAmount} pts`, "success");
           logConsole(`Balance : ${data.remainingBalance} pts`, "success");
           logConsole(`Message : ${data.message}`, "success");
-
-          // Pattern A Session Binding: Clear activeToken from JS memory
-          sessionEstablished = true;
-          activeToken = null;
-          logConsole("[STATEFUL SESSION] Token cleared from JS memory. Subsequent credits rely purely on browser session cookies!", "system");
+          logConsole("[STATEFUL SESSION] Spring Gateway BFF session reused successfully.", "system");
         } else {
           logConsole(`Credit Failed: ${response.status} - ${data}`, "error");
         }
