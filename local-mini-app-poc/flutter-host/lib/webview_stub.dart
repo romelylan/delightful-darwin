@@ -11,4 +11,10 @@ Widget createWebView({
 abstract class WebViewController {
   void postMessage(String message);
   void reload();
+  Future<void> setCookie({
+    required String url,
+    required String name,
+    required String value,
+    String path = "/",
+  });
 }

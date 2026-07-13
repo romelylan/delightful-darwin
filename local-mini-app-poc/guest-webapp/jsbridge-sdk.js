@@ -38,7 +38,7 @@
       throw new Error("createHostAppSdk requires config.miniAppId");
     }
 
-    function requestScopedBootstrapToken(scopes) {
+    function requestHostAction(action, scopes) {
       return new Promise(function (resolve, reject) {
         var requestId = "req_" + Date.now() + "_" + Math.floor(Math.random() * 1000);
 
@@ -59,7 +59,7 @@
           var payload = JSON.stringify({
             miniAppId: config.miniAppId,
             requestId: requestId,
-            action: "auth.getToken",
+            action: action,
             params: { scopes: scopes }
           });
 
@@ -82,40 +82,19 @@
     return {
       auth: {
         /**
-         * Request a scoped token from the Host App via the JS-Bridge.
-         * Returns a Promise that resolves with the token (or ephemeral code).
+         * Ask the Host App for a scoped JWT. This is used only for the non-exchange variant
+         * where the Mini App backend needs only the narrowed token and does not call GMA core services.
          */
         getToken: function (scopes) {
-          return requestScopedBootstrapToken(scopes);
+          return requestHostAction("auth.getToken", scopes);
         },
 
-        bootstrapSession: function (scopes, gatewayBaseUrl) {
-          var baseUrl = gatewayBaseUrl || global.__MINI_APP_GATEWAY_URL__ || "http://localhost:9000";
-
-          return requestScopedBootstrapToken(scopes).then(function (token) {
-            logConsole("One-time Spring Gateway bootstrap token acquired. Establishing BFF session...", "system");
-
-            return fetch(baseUrl + "/api/gateway/bootstrap-session", {
-              method: "POST",
-              headers: {
-                "Authorization": "Bearer " + token,
-                "Content-Type": "application/json"
-              },
-              credentials: "include",
-              body: JSON.stringify({ bootstrap: true })
-            }).then(function (response) {
-              return response.json().catch(function () {
-                return {};
-              }).then(function (data) {
-                if (!response.ok) {
-                  throw new Error(data.error || ("Gateway bootstrap failed with status " + response.status));
-                }
-
-                logConsole("Spring Gateway BFF session established successfully.", "success");
-                return data;
-              });
-            });
-          });
+        /**
+         * Ask the Host App to establish the Spring Gateway BFF session.
+         * The WebView never receives the JWT; it only receives success/failure.
+         */
+        bootstrapSession: function (scopes) {
+          return requestHostAction("auth.bootstrapSession", scopes);
         }
       }
     };
@@ -129,7 +108,14 @@
       var data = JSON.parse(event.data);
       if (data && data.requestId && global._hostAppCallbacks[data.requestId]) {
         if (data.status === "success") {
-          global._hostAppCallbacks[data.requestId].resolve(data.token);
+          var payload = data.token;
+          if (payload === undefined || payload === null) {
+            payload = data.result;
+          }
+          if (payload === undefined || payload === null) {
+            payload = true;
+          }
+          global._hostAppCallbacks[data.requestId].resolve(payload);
         } else {
           global._hostAppCallbacks[data.requestId].reject(data.error);
         }

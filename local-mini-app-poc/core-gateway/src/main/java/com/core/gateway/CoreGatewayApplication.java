@@ -79,6 +79,12 @@ public class CoreGatewayApplication {
 @EnableWebFluxSecurity
 class SecurityConfig {
 
+    @Value("${SESSION_COOKIE_SECURE:false}")
+    private boolean sessionCookieSecure;
+
+    @Value("${SESSION_COOKIE_SAMESITE:Lax}")
+    private String sessionCookieSameSite;
+
     @Bean
     public SecurityWebFilterChain springSecurityFilterChain(ServerHttpSecurity http) {
         http
@@ -134,8 +140,8 @@ class SecurityConfig {
         resolver.setCookieName("SESSION");
         resolver.addCookieInitializer(builder -> {
             builder.path("/");
-            builder.sameSite("None");
-            builder.secure(true);
+            builder.sameSite(sessionCookieSameSite);
+            builder.secure(sessionCookieSecure);
         });
         return resolver;
     }
@@ -171,6 +177,7 @@ class GatewayMiniAppBffController {
 
             return ResponseEntity.ok(Map.of(
                     "status", "session_bootstrapped",
+                    "sessionId", Objects.toString(session.getId(), ""),
                     "userId", Objects.toString(userId, ""),
                     "clientId", Objects.toString(clientId, "")
             ));

@@ -44,10 +44,10 @@ class MobileWebViewController implements WebViewController {
     
     String jsSource;
     if (status == "success") {
-      final String token = data['token'];
+      final String result = (data['result'] ?? data['token'] ?? true).toString();
       jsSource = """
         if (window._hostAppCallbacks && window._hostAppCallbacks['$requestId']) {
-          window._hostAppCallbacks['$requestId'].resolve('$token');
+          window._hostAppCallbacks['$requestId'].resolve('$result');
           delete window._hostAppCallbacks['$requestId'];
         }
       """;
@@ -66,5 +66,23 @@ class MobileWebViewController implements WebViewController {
   @override
   void reload() {
     controller.reload();
+  }
+
+  @override
+  Future<void> setCookie({
+    required String url,
+    required String name,
+    required String value,
+    String path = "/",
+  }) async {
+    final cookieManager = CookieManager.instance();
+    await cookieManager.setCookie(
+      url: WebUri(url),
+      name: name,
+      value: value,
+      path: path,
+      isSecure: false,
+      sameSite: HTTPCookieSameSitePolicy.LAX,
+    );
   }
 }

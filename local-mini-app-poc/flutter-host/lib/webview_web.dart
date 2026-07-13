@@ -122,4 +122,15 @@ class WebWebViewController implements WebViewController {
   void reload() {
     iframe.src = iframe.src;
   }
+
+  @override
+  Future<void> setCookie({
+    required String url,
+    required String name,
+    required String value,
+    String path = "/",
+  }) async {
+    final String cookie = "$name=$value; path=$path; SameSite=Lax";
+    html.document.cookie = cookie;
+  }
 }

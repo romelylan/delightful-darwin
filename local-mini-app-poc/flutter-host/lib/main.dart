@@ -40,6 +40,7 @@ class _HostShellScreenState extends State<HostShellScreen> {
   String _currentMiniAppUrl = "http://localhost:5000";
   String _telemetryLogs = "[Telemetry Core] Booting Host App Shell...\n";
   bool _isLoggedIn = false;
+  final String gatewayBaseUrl = "http://localhost:9000";
 
   // Local Keycloak configurations (Docker mapped ports)
   // For Windows/Chrome, use localhost. For Android emulator, use 10.0.2.2.
@@ -138,6 +139,49 @@ class _HostShellScreenState extends State<HostShellScreen> {
     }
   }
 
+  Future<void> _bootstrapGatewaySession(List<dynamic> scopes, String miniAppId) async {
+    final String scopedToken = await _issueGatewayBootstrapToken(scopes, miniAppId);
+
+    _logTelemetry("Scoped bootstrap token acquired. Establishing Spring Gateway BFF session over host backchannel...");
+
+    final response = await http.post(
+      Uri.parse("$gatewayBaseUrl/api/gateway/bootstrap-session"),
+      headers: {
+        "Authorization": "Bearer $scopedToken",
+        "Content-Type": "application/json",
+      },
+      body: jsonEncode({"bootstrap": true}),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception("Gateway BFF bootstrap failed: Status ${response.statusCode} - ${response.body}");
+    }
+
+    final Map<String, dynamic> responseBody = jsonDecode(response.body);
+
+    String? sessionCookieValue;
+    final String? setCookieHeader = response.headers['set-cookie'];
+    if (setCookieHeader != null && setCookieHeader.isNotEmpty) {
+      final RegExp sessionPattern = RegExp(r'SESSION=([^;]+)');
+      final Match? sessionMatch = sessionPattern.firstMatch(setCookieHeader);
+      sessionCookieValue = sessionMatch?.group(1);
+    }
+
+    sessionCookieValue ??= responseBody['sessionId'] as String?;
+
+    if (sessionCookieValue == null || sessionCookieValue.isEmpty) {
+      throw Exception("Gateway BFF bootstrap succeeded but no usable SESSION identifier was returned.");
+    }
+
+    await _webViewController?.setCookie(
+      url: gatewayBaseUrl,
+      name: 'SESSION',
+      value: sessionCookieValue,
+    );
+
+    _logTelemetry("Spring Gateway BFF session cookie injected into WebView store successfully.");
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -198,6 +242,10 @@ class _HostShellScreenState extends State<HostShellScreen> {
                           child: Text("1. Loyalty Rewards (Model 2/3 - Exchange)"),
                         ),
                         DropdownMenuItem(
+                          value: "http://localhost:5000/loyalty-non-exchange.html",
+                          child: Text("3. Loyalty Rewards - Non Exchange"),
+                        ),
+                        DropdownMenuItem(
                           value: "http://localhost:5000/points.html",
                           child: Text("2. Insurance Points (Model 1 - Direct Core)"),
                         ),
@@ -255,22 +303,43 @@ class _HostShellScreenState extends State<HostShellScreen> {
                   
                   _logTelemetry("Inbound Bridge request: '$action' [ID: $requestId]");
 
-                  if (action == "auth.getToken") {
+                  if (action == "auth.bootstrapSession") {
+                    try {
+                      final scopes = request['params']['scopes'] ?? [];
+                      final String miniAppId = request['miniAppId'] ?? "";
+
+                      await _bootstrapGatewaySession(scopes, miniAppId);
+                      _logTelemetry("Gateway BFF session established fully server-side. Dispatching success to WebView...");
+
+                      _webViewController?.postMessage(jsonEncode({
+                        'requestId': requestId,
+                        'status': 'success',
+                        'result': 'session_bootstrapped',
+                      }));
+                      
+                    } catch (e) {
+                      _logTelemetry("Handshake failed: ${e.toString()}");
+                      _webViewController?.postMessage(jsonEncode({
+                        'requestId': requestId,
+                        'status': 'error',
+                        'error': e.toString(),
+                      }));
+                    }
+                  } else if (action == "auth.getToken") {
                     try {
                       final scopes = request['params']['scopes'] ?? [];
                       final String miniAppId = request['miniAppId'] ?? "";
 
                       final String scopedToken = await _issueGatewayBootstrapToken(scopes, miniAppId);
-                      _logTelemetry("Gateway bootstrap token acquired. Dispatching to WebView for one-time BFF session bootstrap...");
+                      _logTelemetry("Scoped JWT acquired for direct Mini App backend access. Dispatching token to WebView...");
 
                       _webViewController?.postMessage(jsonEncode({
                         'requestId': requestId,
                         'status': 'success',
                         'token': scopedToken,
                       }));
-                      
                     } catch (e) {
-                      _logTelemetry("Handshake failed: ${e.toString()}");
+                      _logTelemetry("Token request failed: ${e.toString()}");
                       _webViewController?.postMessage(jsonEncode({
                         'requestId': requestId,
                         'status': 'error',

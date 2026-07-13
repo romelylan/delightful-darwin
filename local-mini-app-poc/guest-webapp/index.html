@@ -235,8 +235,8 @@
         logConsole("Requesting Spring Gateway BFF session bootstrap from Host App...", "normal");
         
         sessionEstablished = false;
-        await hostAppSdk.auth.bootstrapSession(["loyalty-scope"], gatewayBaseUrl);
-        logConsole("Scoped session established at Spring Gateway. WebView will now use only the BFF cookie.", "success");
+        await hostAppSdk.auth.bootstrapSession(["loyalty-scope"]);
+        logConsole("Scoped session established at Spring Gateway by the host. WebView now uses only the BFF cookie.", "success");
         sessionEstablished = true;
         
         // Update UI status
@@ -270,7 +270,8 @@
           })
         });
 
-        const data = await response.json();
+        const responseText = await response.text();
+        const data = responseText ? JSON.parse(responseText) : null;
         
         if (response.ok) {
           logConsole("=== CLAIM CONFIRMED ===", "success");
@@ -279,7 +280,10 @@
           logConsole(`Balance : ${data.coreWalletResult.remainingBalance} pts`, "success");
           logConsole("[STATEFUL SESSION] Spring Gateway BFF session reused successfully.", "system");
         } else {
-          logConsole(`Claim Failed: ${data.error} - ${data.details}`, "error");
+          const errorMessage = data
+            ? `${data.error || response.status} - ${data.details || responseText}`
+            : `${response.status} ${response.statusText}`;
+          logConsole(`Claim Failed: ${errorMessage}`, "error");
         }
       } catch (err) {
         logConsole(`Network Error connecting to Vendor Backend: ${err.message}`, "error");

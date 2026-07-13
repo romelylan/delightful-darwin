@@ -29,6 +29,46 @@ public class RewardsController {
         this.restTemplate = restTemplate;
     }
 
+    @PostMapping("/test-api")
+    public ResponseEntity<?> testThirdPartyApiCall(
+            @RequestHeader(value = "X-User-Id", required = false) String userId,
+            @RequestHeader(value = "X-Client-Id", required = false) String clientId,
+            @RequestHeader(value = "X-User-Scopes", required = false) String scopes,
+            @RequestHeader(value = "Authorization", required = false) String authorizationHeader,
+            @RequestBody(required = false) Map<String, Object> payload) {
+
+        System.out.println("====== MINI APP VENDOR BACKEND RECEIVED NON-EXCHANGE CALL ======");
+        System.out.println("X-User-Id    (User UUID)     : " + userId);
+        System.out.println("X-Client-Id  (Calling Client): " + clientId);
+        System.out.println("X-User-Scopes(Active Scopes) : " + scopes);
+        System.out.println("Authorization Header Present : " + (authorizationHeader != null && authorizationHeader.startsWith("Bearer ")));
+        System.out.println("===============================================================");
+
+        if (userId == null || userId.isEmpty() || clientId == null || clientId.isEmpty()) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body(Map.of("error", "FORBIDDEN", "details", "Missing trusted gateway identity headers."));
+        }
+
+        if (scopes == null || !scopes.contains("loyalty-scope")) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body(Map.of("error", "FORBIDDEN", "details", "Missing loyalty-scope required for non-exchange Mini App API."));
+        }
+
+        if (authorizationHeader == null || !authorizationHeader.startsWith("Bearer ")) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("error", "UNAUTHORIZED", "details", "Missing or invalid Bearer scoped JWT."));
+        }
+
+        return ResponseEntity.ok(Map.of(
+                "status", "SUCCESS",
+                "message", "3rd-party backend API call succeeded without GMA core token exchange.",
+                "userId", userId,
+                "clientId", clientId,
+                "scopes", scopes,
+                "requestName", payload != null ? payload.getOrDefault("requestName", "Health Check") : "Health Check"
+        ));
+    }
+
     @PostMapping("/claim")
     public ResponseEntity<?> claimReward(
             HttpServletRequest request,

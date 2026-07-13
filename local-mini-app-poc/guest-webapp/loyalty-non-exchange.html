@@ -3,17 +3,16 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Insurance Points - Model 1 Scoped Sandboxed Mini App</title>
-  <!-- Modern Inter typography -->
+  <title>Loyalty Rewards - Non Exchange</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  
+
   <style>
     :root {
-      --bg-dark: #020617;
-      --card-bg: rgba(15, 23, 42, 0.6);
-      --border-color: rgba(16, 185, 129, 0.15);
-      --primary: #10b981; /* Emerald 500 */
-      --secondary: #14b8a6; /* Teal 500 */
+      --bg-dark: #0f172a;
+      --card-bg: rgba(30, 41, 59, 0.7);
+      --border-color: rgba(255, 255, 255, 0.1);
+      --primary: #22c55e;
+      --secondary: #14b8a6;
       --success: #34d399;
       --error: #f87171;
       --text: #f1f5f9;
@@ -39,38 +38,38 @@
       overflow-x: hidden;
     }
 
-    /* Vibrant abstract gradient backgrounds in glassmorphic overlay */
     body::before {
       content: '';
       position: absolute;
-      width: 400px;
-      height: 400px;
-      background: radial-gradient(circle, rgba(16, 185, 129, 0.15) 0%, rgba(0,0,0,0) 70%);
-      top: -100px;
-      left: -100px;
+      width: 420px;
+      height: 420px;
+      background: radial-gradient(circle, rgba(34, 197, 94, 0.20) 0%, rgba(0,0,0,0) 70%);
+      top: -120px;
+      left: -120px;
       z-index: -1;
     }
+
     body::after {
       content: '';
       position: absolute;
-      width: 500px;
-      height: 500px;
-      background: radial-gradient(circle, rgba(20, 184, 166, 0.1) 0%, rgba(0,0,0,0) 70%);
-      bottom: -150px;
-      right: -100px;
+      width: 520px;
+      height: 520px;
+      background: radial-gradient(circle, rgba(20, 184, 166, 0.16) 0%, rgba(0,0,0,0) 70%);
+      bottom: -180px;
+      right: -130px;
       z-index: -1;
     }
 
     .container {
       width: 100%;
-      max-width: 550px;
+      max-width: 560px;
       background: var(--card-bg);
       backdrop-filter: blur(16px);
       -webkit-backdrop-filter: blur(16px);
       border: 1px solid var(--border-color);
       border-radius: 24px;
       padding: 30px;
-      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
       animation: fadeIn 0.6s ease-out;
     }
 
@@ -139,13 +138,13 @@
       align-items: center;
       justify-content: center;
       gap: 10px;
-      box-shadow: 0 4px 15px rgba(16, 185, 129, 0.2);
+      box-shadow: 0 4px 15px rgba(34, 197, 94, 0.22);
       margin-bottom: 12px;
     }
 
     .btn:hover {
       transform: translateY(-2px);
-      box-shadow: 0 6px 20px rgba(16, 185, 129, 0.35);
+      box-shadow: 0 6px 20px rgba(34, 197, 94, 0.35);
     }
 
     .btn:disabled {
@@ -165,7 +164,7 @@
       font-size: 11px;
       max-height: 180px;
       overflow-y: auto;
-      color: #34d399;
+      color: #4ade80;
       text-align: left;
     }
 
@@ -187,6 +186,12 @@
       color: var(--text-muted);
     }
 
+    .flow-note {
+      font-size: 12px;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
     @keyframes fadeIn {
       from { opacity: 0; transform: translateY(10px); }
       to { opacity: 1; transform: translateY(0); }
@@ -198,16 +203,13 @@
   <div class="container">
     <header>
       <div class="status-badge pending" id="authStatusBadge">Unauthenticated</div>
-      <h1>Insurance Points Manager</h1>
-      <div class="subtitle">Model 1 Sandbox Mini-App (Vite / SPA Mock)</div>
+      <h1>Loyalty Rewards - Non Exchange</h1>
+      <div class="subtitle">Model 2 Variant: Scoped JWT Only / 3rd-Party Backend Only</div>
     </header>
 
-    <div class="card" style="margin-bottom: 15px; border: 1px solid rgba(16, 185, 129, 0.25); padding: 15px;">
-      <div style="font-size: 11px; font-weight: 700; color: var(--primary); text-transform: uppercase; letter-spacing: 0.05em;">
-        Flow Verification: Pattern A (Stateful Session Cookies)
-      </div>
-      <div style="font-size: 12px; color: var(--text-muted); margin-top: 5px; line-height: 1.4;">
-        Since this app is developed by the Core Team (Model 1), its frontend uses standard <strong>refresh-token scope down</strong> to request <code>insurance-scope</code>. Its backend is the Core Backend itself, meaning it calls Core APIs directly <strong>without Keycloak Token Exchange</strong>. Under <strong>Pattern A</strong>, the token is swapped at the Ingress Gateway, cached in <code>WebSession</code>, and wiped from JS memory. Subsequent calls use the Gateway cookie.
+    <div class="card">
+      <div class="flow-note">
+        This variant demonstrates the common case where the 3rd-party backend only needs a narrowly-scoped JWT for its own API and does <strong>not</strong> call GMA core microservices. The WebView receives only <strong>loyalty-scope</strong>, and the backend returns success without performing token exchange.
       </div>
     </div>
 
@@ -215,14 +217,14 @@
       <button class="btn" id="btnRequestToken" onclick="fetchTokenFromHost()">
         1. Request Scoped Token from Host App
       </button>
-      <button class="btn" id="btnCreditPoints" onclick="creditWalletPoints()" disabled>
-        2. Credit 200 Wallet Points (Direct Core API)
+      <button class="btn" id="btnTestThirdPartyApi" onclick="testThirdPartyApiCall()" disabled>
+        2. Test 3rd Party API Call
       </button>
     </div>
 
     <div class="card">
       <div style="font-size: 12px; font-weight: 600; margin-bottom: 10px; color: var(--text-muted);">
-        Real-Time Model 1 Flow Log
+        Real-Time Non-Exchange Flow Log
       </div>
       <div class="console-card" id="consoleOutput">
         <div class="console-line system-text">[Console Idle] Awaiting User Handshake.</div>
@@ -232,71 +234,66 @@
 
   <script src="jsbridge-sdk.js"></script>
   <script>
-    // -------------------------------------------------------------
-    // PAGE-SPECIFIC: Insurance Points Mini App
-    // -------------------------------------------------------------
     const gatewayBaseUrl = "http://localhost:9000";
-    const hostAppSdk = createHostAppSdk({ miniAppId: "com.vendor.insurance-points" });
-    let sessionEstablished = false;
+    const hostAppSdk = createHostAppSdk({ miniAppId: "com.vendor.loyalty-rewards-non-exchange" });
+    let activeToken = null;
 
     async function fetchTokenFromHost() {
       try {
-        logConsole("Requesting Spring Gateway BFF session bootstrap from Host App...", "normal");
-        sessionEstablished = false;
-        await hostAppSdk.auth.bootstrapSession(["insurance-scope"]);
-        logConsole("Scoped session established at Spring Gateway by the host. WebView now uses only the BFF cookie.", "success");
-        sessionEstablished = true;
-        
+        logConsole("Requesting direct scoped JWT from Host App (no backend token exchange)...", "normal");
+
+        activeToken = await hostAppSdk.auth.getToken(["loyalty-scope"]);
+        logConsole(`Acquired Scoped JWT: ${activeToken.substring(0, 30)}...`, "success");
+
         const badge = document.getElementById("authStatusBadge");
         badge.innerText = "AUTHENTICATED";
         badge.className = "status-badge success";
-        
-        document.getElementById("btnCreditPoints").disabled = false;
+
+        document.getElementById("btnTestThirdPartyApi").disabled = false;
       } catch (err) {
         logConsole(`Auth Handshake Failed: ${err}`, "error");
       }
     }
 
-    async function creditWalletPoints() {
-      if (!sessionEstablished) {
+    async function testThirdPartyApiCall() {
+      if (!activeToken) {
         logConsole("Authentication required. Please request token first.", "error");
         return;
       }
 
-      logConsole("Sending credit request to Core Gateway (Strategy: SPRING GATEWAY BFF SESSION)...", "normal");
-      
+      logConsole("Sending direct 3rd-party backend API call with scoped JWT...", "normal");
+
       try {
-        // Call Core credit API directly via the Spring Gateway BFF session.
-        const response = await fetch(`${gatewayBaseUrl}/api/wallet/credit`, {
+        const response = await fetch(`${gatewayBaseUrl}/api/rewards/test-api`, {
           method: "POST",
           headers: {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${activeToken}`
           },
           credentials: "include",
           body: JSON.stringify({
-            amount: 200
+            requestName: "Loyalty Rewards Non-Exchange Smoke Test"
           })
         });
 
         const responseText = await response.text();
         const data = responseText ? JSON.parse(responseText) : null;
-        
+
         if (response.ok) {
-          logConsole("=== CREDIT CONFIRMED ===", "success");
+          logConsole("=== 3RD PARTY API CALL CONFIRMED ===", "success");
           logConsole(`Status  : ${data.status}`, "success");
-          logConsole(`Client  : ${data.transactingClient}`, "success");
-          logConsole(`Credited: +${data.creditedAmount} pts`, "success");
-          logConsole(`Balance : ${data.remainingBalance} pts`, "success");
           logConsole(`Message : ${data.message}`, "success");
-          logConsole("[STATEFUL SESSION] Spring Gateway BFF session reused successfully.", "system");
+          logConsole(`User    : ${data.userId}`, "success");
+          logConsole(`Client  : ${data.clientId}`, "success");
+          logConsole(`Scopes  : ${data.scopes}`, "success");
         } else {
           const errorMessage = data
             ? `${data.error || response.status} - ${data.details || responseText}`
             : `${response.status} ${response.statusText}`;
-          logConsole(`Credit Failed: ${errorMessage}`, "error");
+          logConsole(`3rd Party API Call Failed: ${errorMessage}`, "error");
         }
       } catch (err) {
-        logConsole(`Network Error connecting to Core Gateway: ${err.message}`, "error");
+        logConsole(`Network Error connecting to 3rd-party backend: ${err.message}`, "error");
       }
     }
   </script>
